@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en-AU" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Slotted, training that fits your week</title>
+  <meta name="description" content="A gym planner for students who play sport. Tell it your week once and it fits your training around school, games and everything else.">
+  <meta name="theme-color" content="#101214">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script>
+    // Apply the saved theme before first paint so there's no flash.
+    try {
+      var t = (JSON.parse(localStorage.getItem('slotted:v1') || '{}').theme) || 'dark';
+      if (t === 'system') t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      document.documentElement.dataset.theme = t;
+    } catch (e) { /* default dark */ }
+  </script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar" aria-label="Slotted">
+      <a class="brand" href="#home" aria-label="Slotted home">
+        <svg class="brand-mark" viewBox="0 0 26 26" aria-hidden="true"><rect x="1.5" y="1.5" width="23" height="23" rx="6" fill="none" stroke="currentColor" stroke-width="2.4"/><rect x="6" y="6" width="5" height="14" rx="1.5" fill="#c5f23d"/><rect x="13.5" y="6" width="5" height="14" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="2.4 2"/></svg>
+        <span class="brand-name">Slotted</span>
+      </a>
+      <nav class="nav" aria-label="Main">
+        <a href="#home" data-nav="home"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5V19a1.5 1.5 0 0 1-1.5 1.5H15v-6H9v6H5.5A1.5 1.5 0 0 1 4 19z"/></svg><span>Home</span></a>
+        <a href="#plan" data-nav="training"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 9.5v5M6.5 7v10M17.5 7v10M20.5 9.5v5M6.5 12h11"/></svg><span>Training</span></a>
+        <a href="#progress" data-nav="progress"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5h16M6.5 16v-4M11 16V8M15.5 16v-6M20 16V5"/></svg><span>Progress</span></a>
+        <a href="#coach" data-nav="coach"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 11.5a8.5 8 0 0 1-12.3 7.2L3.5 20l1.3-4.2A8.5 8 0 1 1 20.5 11.5z"/><path d="M8.5 11.5h.01M12 11.5h.01M15.5 11.5h.01"/></svg><span>Coach</span></a>
+        <a href="#profile" data-nav="profile"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="17" r="2"/></svg><span>Settings</span></a>
+      </nav>
+      <a class="side-week" id="side-week" href="#plan"></a>
+    </aside>
+    <div class="main">
+      <header class="mtop">
+        <a class="brand" href="#home" aria-label="Slotted home">
+          <svg class="brand-mark" viewBox="0 0 26 26" aria-hidden="true"><rect x="1.5" y="1.5" width="23" height="23" rx="6" fill="none" stroke="currentColor" stroke-width="2.4"/><rect x="6" y="6" width="5" height="14" rx="1.5" fill="#c5f23d"/><rect x="13.5" y="6" width="5" height="14" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="2.4 2"/></svg>
+          <span class="brand-name">Slotted</span>
+        </a>
+      </header>
+      <main id="app" tabindex="-1"></main>
+    </div>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
