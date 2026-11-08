@@ -50,28 +50,42 @@ export async function onRequestPost({ request, env }) {
     await env.COACH_LIMITS.put(key, String(used + 1), { expirationTtl: 60 * 60 * 48 });
   }
 
+  const base = {
+    model: env.COACH_MODEL || 'claude-haiku-5-5',
+    system: `${COACH_INSTRUCTIONS}\n\n${context}`,
+    messages: turns,
+  };
+  // The model thinks before answering by default, and that thinking counts toward max_tokens.
+  // Low effort keeps chat replies quick; the generous limit leaves room for thinking plus the answer.
+  let out = await callClaude(env, { ...base, max_tokens: 4000, output_config: { effort: 'low' } });
+  if (out.error) return json({ error: out.error }, 502);
+  // If it ran out of room before writing anything, ask again with thinking switched off.
+  if (!out.text && out.stop !== 'refusal') {
+    out = await callClaude(env, { ...base, max_tokens: 2000, thinking: { type: 'disabled' }, output_config: { effort: 'low' } });
+    if (out.error) return json({ error: out.error }, 502);
+  }
+  if (out.stop === 'refusal' && !out.text) return json({ text: REFUSED_TEXT });
+  if (!out.text) return json({ error: 'upstream_error' }, 502);
+  return json({ text: out.text });
+}
+
+const REFUSED_TEXT = 'I can’t help with that one. Ask me about your training, recovery, sleep or fitting workouts into your week and I’ll help straight away.';
+
+async function callClaude(env, body) {
   let res;
   try {
     res = await fetch(API_URL, {
       method: 'POST',
-      headers: {
-        'x-api-key': env.ANTHROPIC_API_KEY,
-        'anthropic-version': API_VERSION,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: env.COACH_MODEL || 'claude-haiku-5-5',
-        max_tokens: 700,
-        system: `${COACH_INSTRUCTIONS}\n\n${context}`,
-        messages: turns,
-      }),
+      headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': API_VERSION, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
     });
   } catch {
-    return json({ error: 'upstream_error' }, 502);
+    return { error: 'upstream_error' };
   }
-  if (res.status === 429) return json({ error: 'busy' }, 502);
-  if (!res.ok) return json({ error: 'upstream_error' }, 502);
-  const data = await res.json();
+  if (res.status === 429 || res.status === 529) return { error: 'busy' };
+  if (!res.ok) return { error: 'upstream_error' };
+  const data = await res.json().catch(() => ({}));
+  // Pick text blocks by type: replies can start with thinking blocks.
   const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
-  return json({ text: text || 'I couldn’t come up with an answer to that. Try asking another way.' });
+  return { text, stop: data.stop_reason };
 }
