@@ -18,6 +18,7 @@ export const defaultState = () => ({
   restDays: [], // weekday indexes (0 = Monday) never to plan gym sessions on
   units: 'kg', // 'kg' | 'lb'. Weights are always stored in kg; this is only for showing and typing.
   customExercises: [], // the user's own exercises (ids start with u_). Deleted ones keep { deleted: true } so sync doesn't bring them back.
+  dayWindows: {}, // { [weekday]: { start, end } } training hours for particular days
 });
 
 export function load() {

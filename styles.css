@@ -886,3 +886,31 @@ td .effort-opts { max-width: 300px; }
 .tbar i { position: absolute; left: 0; right: 0; bottom: 0; height: var(--h); border-radius: 5px; }
 .tcol small { font-size: 11.5px; color: var(--text-3); }
 .tbar i.l0 { background: var(--rec-0); } .tbar i.l1 { background: var(--rec-1); } .tbar i.l2 { background: var(--rec-2); } .tbar i.l3 { background: var(--rec-3); }
+
+/* ---------- Stage 3: timetable changes and suggestions ---------- */
+.item .item-edit { font-size: 14.5px; text-align: left; padding: 2px 0; min-height: 32px; cursor: pointer; text-decoration: none; }
+.item .item-edit:hover span, .item .item-edit[aria-expanded='true'] span { text-decoration: underline; text-underline-offset: 3px; }
+.item.flex { background-image: repeating-linear-gradient(135deg, transparent 0 6px, rgba(127, 127, 127, 0.08) 6px 12px); }
+.blockedit { margin: 10px 0 4px; padding: 14px; border-radius: var(--r-md); background: var(--surface-2); grid-column: 1 / -1; }
+.blockextras summary, .daywins summary { cursor: pointer; font-size: 14.5px; color: var(--text-2); padding: 4px 0; }
+.blockextras[open] summary, .daywins[open] summary { margin-bottom: 10px; }
+.blockextras .row { margin-top: 10px; }
+.daywin { display: grid; grid-template-columns: 40px minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; margin-top: 6px; font-size: 14.5px; }
+.daywin input { min-height: 40px; }
+.oneoffs { display: grid; gap: 4px; }
+.oneoffs li { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 14.5px; }
+.avail textarea { width: 100%; }
+.avail-ex { display: flex; flex-wrap: wrap; gap: 6px; }
+.avail-ex button { min-height: 34px; padding: 5px 10px; font-size: 13.5px; font-weight: 500; border: 1px solid var(--line); }
+.avail-preview, .avail-done { display: grid; gap: 10px; padding: 14px; border-radius: var(--r-md); background: var(--surface-2); }
+.avail-done .proposals { margin: 0; }
+.propmoves { display: grid; gap: 4px; font-size: 14.5px; padding-left: 18px; list-style: disc; }
+.proposals { display: grid; gap: 12px; margin-bottom: 16px; border-color: var(--lime-line); }
+.proposals .card-head { margin-bottom: 0; flex-wrap: wrap; }
+.proposal { display: grid; gap: 8px; padding: 14px; border-radius: var(--r-md); background: var(--surface-2); }
+.proposal > b { font-size: 16.5px; }
+.suggest-banner { display: flex; align-items: center; gap: 12px; text-decoration: none; color: inherit; margin-bottom: 16px; border-color: var(--lime-line); }
+.suggest-banner .ico { color: var(--lime-text); flex-shrink: 0; }
+.suggest-banner span { display: grid; gap: 2px; }
+.suggest-banner small { color: var(--text-2); font-size: 14px; }
+.oneoffs { padding: 0; margin: 0; list-style: none; } .oneoffs li { padding: 2px 0; }

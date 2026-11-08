@@ -233,7 +233,8 @@ export function freeGaps(blocks, day, window) {
   const end = toMin(window.end);
   const busy = blocks
     .filter((b) => b.day === day)
-    .map((b) => [Math.max(start, toMin(b.start) - BUFFER), Math.min(end, toMin(b.end) + BUFFER)])
+    // Travel or preparation time set on a commitment (minutes before and after) adds to the usual buffer.
+    .map((b) => [Math.max(start, toMin(b.start) - BUFFER - (Number(b.before) || 0)), Math.min(end, toMin(b.end) + BUFFER + (Number(b.after) || 0))])
     .filter(([a, b]) => b > a)
     .sort((x, y) => x[0] - y[0]);
   const gaps = [];
@@ -424,6 +425,7 @@ export function sessionKeysFor(profile, busy) {
  *   busy     busy week: shorter sessions, main lifts only
  *   skipDays days the user can't train this week
  *   keepOrder keep sessions in the given order through the week (custom routines)
+ *   dayWindows { [day]: { start, end } } training hours for particular days
  */
 export function planWeek(profile, blocks, window, opts = {}) {
   const busy = !!opts.busy;
@@ -437,11 +439,12 @@ export function planWeek(profile, blocks, window, opts = {}) {
   const sport = [];
   for (let d = 0; d < 7; d++) {
     sport[d] = sportOn(blocks, d);
-    let win = window;
+    // A day can have its own training hours (for example, free earlier on Wednesday mornings).
+    let win = (opts.dayWindows && opts.dayWindows[d]) || window;
     if (opts.nowMin != null && d === fromDay) {
       const earliest = Math.ceil((opts.nowMin + 15) / 15) * 15;
       if (earliest >= toMin(window.end)) { slots[d] = null; continue; }
-      win = { start: toHHMM(Math.max(toMin(window.start), earliest)), end: window.end };
+      win = { start: toHHMM(Math.max(toMin(win.start), earliest)), end: win.end };
     }
     slots[d] = bestSlot(blocks, d, win, length, profile.timeOfDay);
   }

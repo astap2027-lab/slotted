@@ -28,6 +28,7 @@ A gym planner for students who play sport. It fits gym sessions around school, s
 - `js/freshness.js`: muscle recovery estimate per detailed muscle (built on the original model), effort and intensity scaling.
 - `js/progress.js`: per-exercise history and personal bests, type-aware (weight, reps, time, distance).
 - `js/stats.js`: Home and Progress numbers (consistency, volume, records, finished workouts).
+- `js/timetable.js`: which commitments apply each week, plain-words changes, validation and apply. `js/adjust.js`: fatigue-aware suggestions.
 - `js/units.js`: kg/lb conversion, bar and plates. `js/tracking.js`: how each tracking type is logged, suggested, compared and written out.
 - `js/workout.js`: rest timer lengths, plates, warm-ups, older swap logic. `js/readiness.js`: daily check-in. `js/coach.js`: coach instructions and client. `js/sync.js`: merging two devices. `js/store.js`: saving, defaults, backup.
 - `styles.css`: the design system. `index.html`, `privacy.html`, `sw.js`, `manifest.webmanifest`.
@@ -61,5 +62,9 @@ The full brief is in `docs/upgrade-brief.md`. Axel chose:
 - Progress recovery: tap a group to see each muscle; tap a muscle for freshness, likely recovery time, a 7-day trend, recent volume (this week and last) and the exercises that worked it (`partWork`, `partVolume` in `stats.js`).
 - Coach context lists tired detailed muscles, effort taps and the optional check-in answers.
 
-### Stage 3: smart timetable and fatigue-aware changes
-Natural-language availability ("I finish school at 1:05 pm on Tuesdays", "I can't train this Saturday") through the coach: the AI turns it into a structured change, app logic validates it, and the user sees a preview and approves. Add one-off exceptions, fortnightly or rotating schedules, travel and preparation time, fixed versus flexible commitments, and locking individual workouts. Fatigue-aware proposals (move, swap, lighten or rest), each with the reason, what moves, and accept or reject. Fixed commitments are never moved.
+### Stage 3: smart timetable and fatigue-aware changes (done, branch `claude/stage-3-timetable`)
+- `js/timetable.js`: `weekBlocks(state, key)` is now what `blocksFor()` returns: the A/B template, commitments that repeat every N weeks (`every`, `anchor`), minus `history[week].hidden` ids, plus `history[week].extra` one-offs. `windowFor()` gives per-day training hours (`state.dayWindows`, or `history[week].windows` for one week). Block fields added: `flex` (flexible), `before`/`after` (travel or prep minutes, used by `freeGaps`). `planWithFlex()` lets flexible commitments give way only when a week can't fit every session.
+- Plain-words changes: `parseAvailability()` reads common phrasings locally (school/work start or finish times, can't train, new commitments with times, free mornings/evenings, sore muscles and tiredness). Anything else goes to `functions/api/timetable.js` (forced tool call, thinking off, same key, model and daily limit as the coach). Every change goes through `validateChange()`, the user sees a preview with the plan diff, and `applyChanges()` runs only on Apply. The box is on My week and beside the coach chat.
+- `js/adjust.js`: `proposeChanges()` looks at the next two days using estimated muscle freshness at each session's time, today's check-in and what the user said (`history[week].reports[day]`). It suggests swap, move, rest or lighten, each with the reason and what moves. Accept pins moved sessions or adds the key to `history[week].lighten`; No thanks adds the id to `history[week].dismissed`. Locked sessions (`s.locked`, More menu) and commitments are never moved. Shown on This week, flagged on Home, and listed in the coach context (computed without Strava).
+- My week: tap a commitment to edit it (day, times, type, flexible, travel, repeats); one-off changes for this week and next are listed with Undo; "Different hours on some days".
+

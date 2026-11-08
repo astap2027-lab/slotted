@@ -1,11 +1,16 @@
 import {
   DAYS, DAYS_SHORT, planWeek, weekKey, weekType, keyToDate, fmtTime, toMin, toHHMM, streakInfo, SPLIT_NAMES, SPLITS, SESSIONS,
-  busyCount, sessionKeysFor, moveName, weeksBetween, addWeeks, sessionInfo, GROUPS, exercisesFor, freeGaps,
+  busyCount, sessionKeysFor, moveName, weeksBetween, addWeeks, sessionInfo, GROUPS, exercisesFor, freeGaps, bestSlot,
   exerciseLibrary, setCustomRoutine, rememberExerciseNames, customExerciseNames, routineKeys, exerciseKey,
 } from './scheduler.js';
 import { collectHistory, summarise } from './progress.js';
 import { QUESTIONS, EXTRAS, readiness, adjustment, applyAdjustment, extrasText } from './readiness.js';
 import { askCoach, formatReply, STARTERS } from './coach.js';
+import {
+  weekBlocks, windowFor, dayWindows, parseAvailability, validateChange, applyChanges, describeChange, touchesFixed,
+  timetableContext, askTimetable, BLOCK_TYPES, planWithFlex, appliesTo,
+} from './timetable.js';
+import { proposeChanges, applyProposal } from './adjust.js';
 import { load, save, exportJSON, importJSON, reset, defaultState } from './store.js';
 import { mergeStates, forUpload } from './sync.js';
 import { computeFreshness, freshnessLevel, LEVEL_LABELS, musclesFor, MUSCLES, PARTS, EFFORT, MAP_GROUPS } from './freshness.js';
@@ -50,7 +55,9 @@ function toast(msg) {
 const today = () => new Date();
 const currentWeek = () => weekKey(today());
 const typeOf = (key) => (state.useAB ? weekType(key, state.abAnchor) : 'A');
-const blocksFor = (key) => state.blocks[typeOf(key)] || [];
+// Commitments that apply in a week: its template (A or B), repeats every few weeks, and one-off changes.
+const blocksFor = (key) => weekBlocks(state, key);
+const winFor = (key, day) => windowFor(state, key, day);
 const templateSport = (key) => blocksFor(key).filter((b) => b.type === 'sport').length;
 const sportCredit = (key) => templateSport(key) + (key === currentWeek() ? stravaFor(key).length : 0);
 const todayIndex = () => (today().getDay() + 6) % 7;
@@ -358,6 +365,146 @@ function splitSummary() {
     .map((k) => ({ name: SESSIONS[k].name, exercises: exercisesFor(k, state.profile).map((x) => x.name) }));
 }
 
+// ---------- My week: commitment details ----------
+let editingBlock = null; // id of the commitment being edited
+const MINS = [0, 10, 15, 20, 30, 45, 60];
+const blockTags = (b) => [
+  b.flex ? 'Flexible' : '',
+  b.before || b.after ? `${[b.before ? `${b.before} min before` : '', b.after ? `${b.after} min after` : ''].filter(Boolean).join(', ')}` : '',
+  Number(b.every) > 1 ? `Every ${b.every} weeks${b.anchor && appliesThisWeek(b) ? ', on this week' : b.anchor ? ', off this week' : ''}` : '',
+].filter(Boolean).map((t) => ` <b class="tag">${esc(t)}</b>`).join('');
+const appliesThisWeek = (b) => appliesTo(b, currentWeek());
+
+// Flexible, travel or preparation time, and how often it repeats. Used when adding and editing.
+function blockExtras(b) {
+  const sel = (name, label, opts, v) => `<div class="field"><label for="x-${name}-${b.id || 'new'}">${label}</label><select id="x-${name}-${b.id || 'new'}" name="${name}">${opts.map(([val, t]) => `<option value="${val}" ${Number(v || 0) === val || (!v && val === opts[0][0]) ? 'selected' : ''}>${t}</option>`).join('')}</select></div>`;
+  const mins = MINS.map((m) => [m, m ? `${m} min` : 'None']);
+  return `<details class="blockextras"${b.flex || b.before || b.after || Number(b.every) > 1 ? ' open' : ''}>
+    <summary>More options: flexible, travel time, repeats</summary>
+    <label class="chip"><input type="checkbox" name="flex" value="1" ${b.flex ? 'checked' : ''}><span>Flexible<small>Can give way when a week is too full to fit your sessions. Fixed ones never do.</small></span></label>
+    <div class="row">
+      ${sel('before', 'Travel or prep before', mins, b.before)}
+      ${sel('after', 'Travel after', mins, b.after)}
+      ${sel('every', 'Repeats', [[1, 'Every week'], [2, 'Every 2 weeks'], [3, 'Every 3 weeks'], [4, 'Every 4 weeks']], b.every || 1)}
+    </div>
+  </details>`;
+}
+function readExtras(f, old = {}) {
+  const every = Number(f.get('every')) || 1;
+  return {
+    ...(f.get('flex') ? { flex: true } : {}),
+    ...(Number(f.get('before')) ? { before: Number(f.get('before')) } : {}),
+    ...(Number(f.get('after')) ? { after: Number(f.get('after')) } : {}),
+    ...(every > 1 ? { every, anchor: old.every === every && old.anchor ? old.anchor : currentWeek() } : {}),
+  };
+}
+
+function blockEditor(b) {
+  return `<form class="blockedit stack" data-editform="${b.id}" novalidate>
+    <div class="row">
+      <div class="field"><label for="e-label">What is it?</label><input id="e-label" name="label" type="text" value="${esc(b.label)}"></div>
+      <div class="field"><label for="e-type">Type</label><select id="e-type" name="type">${Object.entries(BLOCK_TYPES).map(([k, v]) => `<option value="${k}" ${b.type === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+    </div>
+    <div class="row">
+      <div class="field"><label for="e-day">Day</label><select id="e-day" name="day">${DAYS.map((n, d) => `<option value="${d}" ${b.day === d ? 'selected' : ''}>${n}</option>`).join('')}</select></div>
+      <div class="field"><label for="e-start">From</label><input id="e-start" name="start" type="time" value="${b.start}"></div>
+      <div class="field"><label for="e-end">To</label><input id="e-end" name="end" type="time" value="${b.end}"></div>
+    </div>
+    <div class="field" ${b.type === 'sport' ? '' : 'hidden'} data-eint><label for="e-int">How hard is it?</label><select id="e-int" name="intensity"><option value="light" ${b.intensity !== 'hard' ? 'selected' : ''}>Training</option><option value="hard" ${b.intensity === 'hard' ? 'selected' : ''}>Game or race</option></select></div>
+    ${blockExtras(b)}
+    <p class="errors" role="alert"></p>
+    <div class="actions"><button type="submit" class="primary">Save</button><button type="button" class="ghost" data-editcancel>Cancel</button></div>
+  </form>`;
+}
+
+// One-off changes for this week and next, each with an undo.
+function oneOffCard() {
+  const key = currentWeek();
+  const rows = [];
+  for (const wk of [key, addWeeks(key, 1)]) {
+    const e = state.history[wk] || {};
+    const label = wk === key ? 'this' : 'next';
+    const tpl = state.blocks[typeOf(wk)] || [];
+    for (const b of e.extra || []) rows.push([`${b.label}, ${label} ${DAYS[b.day]} ${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}${b.from ? ' (changed time)' : ''}`, `extra|${wk}|${b.id}`]);
+    for (const id of e.hidden || []) {
+      const b = tpl.find((x) => x.id === id);
+      const changed = (e.extra || []).some((x) => x.from === id);
+      if (b && !changed) rows.push([`No ${b.label} ${label} ${DAYS[b.day]}`, `hidden|${wk}|${id}`]);
+    }
+    for (const d of e.skipDays || []) rows.push([`No training ${label} ${DAYS[d]}`, `skip|${wk}|${d}`]);
+    for (const [d, w] of Object.entries(e.windows || {})) rows.push([`Training hours ${label} ${DAYS[d]}: ${fmtTime(toMin(w.start))} to ${fmtTime(toMin(w.end))}`, `win|${wk}|${d}`]);
+  }
+  if (!rows.length) return '';
+  return `<section class="card stack">
+    <h2>Just this week and next</h2>
+    <p class="muted small">One-off changes. Your usual week stays as it is.</p>
+    <ul class="oneoffs">${rows.map(([t, id]) => `<li><span>${esc(t)}</span><button type="button" class="ghost" data-undo="${esc(id)}">Undo</button></li>`).join('')}</ul>
+  </section>`;
+}
+
+function wireWeekExtras() {
+  app.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => {
+    editingBlock = editingBlock === b.dataset.edit ? null : b.dataset.edit;
+    renderWeek();
+  }));
+  app.querySelectorAll('[data-editcancel]').forEach((b) => b.addEventListener('click', () => { editingBlock = null; renderWeek(); }));
+  app.querySelectorAll('[data-editform]').forEach((form) => {
+    form.querySelector('[name=type]').addEventListener('change', (e) => { form.querySelector('[data-eint]').hidden = e.target.value !== 'sport'; });
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const f = new FormData(form);
+      const list = state.blocks[editingWeek];
+      const i = list.findIndex((x) => x.id === form.dataset.editform);
+      if (i < 0) return;
+      const old = list[i];
+      const start = f.get('start');
+      const end = f.get('end');
+      if (!start || !end || toMin(end) <= toMin(start)) { form.querySelector('.errors').textContent = 'The finish time needs to be after the start time.'; return; }
+      const type = f.get('type');
+      const { flex, before, after, every, anchor, intensity, ...keep } = old;
+      list[i] = {
+        ...keep, label: (f.get('label') || '').trim() || BLOCK_TYPES[type], type, day: Number(f.get('day')), start, end,
+        ...(type === 'sport' ? { intensity: f.get('intensity') } : {}), ...readExtras(f, old),
+      };
+      editingBlock = null;
+      commit(); renderWeek();
+      toast(`${list[i].label} saved`);
+    });
+  });
+  app.querySelectorAll('[data-undo]').forEach((b) => b.addEventListener('click', () => {
+    const [kind, wk, id] = b.dataset.undo.split('|');
+    const e = state.history[wk];
+    if (!e) return;
+    if (kind === 'extra') {
+      const x = (e.extra || []).find((y) => y.id === id);
+      e.extra = (e.extra || []).filter((y) => y.id !== id);
+      if (x && x.from) e.hidden = (e.hidden || []).filter((h) => h !== x.from);
+    }
+    if (kind === 'hidden') e.hidden = (e.hidden || []).filter((h) => h !== id);
+    if (kind === 'skip') e.skipDays = (e.skipDays || []).filter((d) => d !== Number(id));
+    if (kind === 'win' && e.windows) delete e.windows[id];
+    commit(); renderWeek(); toast('Undone');
+  }));
+  app.querySelectorAll('[data-dw]').forEach((inp) => inp.addEventListener('change', () => {
+    const d = inp.dataset.dw.split('|')[0];
+    const st = document.getElementById(`dw-s-${d}`).value;
+    const en = document.getElementById(`dw-e-${d}`).value;
+    state.dayWindows = { ...(state.dayWindows || {}) };
+    if (!st && !en) delete state.dayWindows[d];
+    else {
+      const w = { start: st || state.window.start, end: en || state.window.end };
+      if (toMin(w.end) - toMin(w.start) < 60) { toast('Leave at least an hour between earliest and latest.'); return; }
+      state.dayWindows[d] = w;
+    }
+    commit(); renderWeek(); toast(`Training hours saved for ${DAYS[d]}`);
+  }));
+  app.querySelectorAll('[data-dwclear]').forEach((b) => b.addEventListener('click', () => {
+    state.dayWindows = { ...(state.dayWindows || {}) };
+    delete state.dayWindows[b.dataset.dwclear];
+    commit(); renderWeek();
+  }));
+}
+
 function renderWeek() {
   if (!state.useAB) editingWeek = 'A';
   const blocks = state.blocks[editingWeek];
@@ -387,11 +534,12 @@ function renderWeek() {
             <b>${name}${rest.includes(d) ? '<small class="restday">Rest day</small>' : ''}</b>
             <div class="items">
               ${byDay[d].length ? byDay[d].map((b) => `
-                <span class="item ${b.type}">
-                  <span>${esc(b.label)}, ${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}${b.type === 'sport' && b.intensity === 'hard' && !/game|race|match/i.test(b.label) ? ' <b class="tag">Game</b>' : ''}</span>
+                <span class="item ${b.type}${b.flex ? ' flex' : ''}">
+                  <button type="button" class="item-edit" data-edit="${b.id}" aria-expanded="${editingBlock === b.id}" aria-label="Edit ${esc(b.label)} on ${name}"><span>${esc(b.label)}, ${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}${b.type === 'sport' && b.intensity === 'hard' && !/game|race|match/i.test(b.label) ? ' <b class="tag">Game</b>' : ''}${blockTags(b)}</span></button>
                   <button type="button" data-del="${b.id}" aria-label="Remove ${esc(b.label)} on ${name}">×</button>
                 </span>`).join('') : '<span class="empty">Free</span>'}
             </div>
+            ${byDay[d].some((b) => b.id === editingBlock) ? blockEditor(byDay[d].find((b) => b.id === editingBlock)) : ''}
           </div>`).join('')}
         </div>
       </section>
@@ -403,6 +551,8 @@ function renderWeek() {
       </section>
     </div>
     <div class="stack">
+      ${availHtml()}
+      ${oneOffCard()}
       ${hasSchool ? '' : `
       <section class="card stack">
         <h2>Start with school</h2>
@@ -439,6 +589,7 @@ function renderWeek() {
           <div class="field"><label for="start">From</label><input id="start" name="start" type="time" value="16:00"></div>
           <div class="field"><label for="end">To</label><input id="end" name="end" type="time" value="17:30"></div>
         </div>
+        ${blockExtras({})}
         ${state.useAB ? `<label class="chip"><input type="checkbox" name="both" value="1" checked><span>Same in Week A and Week B</span></label>` : ''}
         <p class="errors" id="adderr" role="alert"></p>
         <button class="primary" type="submit">Add commitment</button>
@@ -450,6 +601,14 @@ function renderWeek() {
           <div class="field"><label for="win-start">Earliest start</label><input id="win-start" type="time" value="${state.window.start}"></div>
           <div class="field"><label for="win-end">Latest finish</label><input id="win-end" type="time" value="${state.window.end}"></div>
         </div>
+        <details class="daywins"${Object.keys(state.dayWindows || {}).length ? ' open' : ''}>
+          <summary>Different hours on some days</summary>
+          <p class="muted small">Leave a day blank to use the times above.</p>
+          ${DAYS.map((n, d) => { const w = (state.dayWindows || {})[d] || {}; return `<div class="daywin"><span>${DAYS_SHORT[d]}</span>
+            <label class="sr" for="dw-s-${d}">${n} earliest start</label><input id="dw-s-${d}" type="time" data-dw="${d}|start" value="${w.start || ''}">
+            <label class="sr" for="dw-e-${d}">${n} latest finish</label><input id="dw-e-${d}" type="time" data-dw="${d}|end" value="${w.end || ''}">
+            ${w.start ? `<button type="button" class="ghost" data-dwclear="${d}" aria-label="Use the usual hours on ${n}">Clear</button>` : ''}</div>`; }).join('')}
+        </details>
       </section>
       <section class="card stack">
         <h2>Rest days</h2>
@@ -460,7 +619,9 @@ function renderWeek() {
     </div>
   </div>`;
 
-  app.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => { editingWeek = b.dataset.tab; renderWeek(); }));
+  app.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => { editingWeek = b.dataset.tab; editingBlock = null; renderWeek(); }));
+  wireAvail(renderWeek);
+  wireWeekExtras();
   app.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => {
     state.blocks[editingWeek] = state.blocks[editingWeek].filter((x) => x.id !== b.dataset.del);
     commit(); renderWeek();
@@ -500,6 +661,7 @@ function renderWeek() {
       state.blocks[w].push({
         id: uid(), day: d, start, end, type, label,
         ...(type === 'sport' ? { intensity: f.get('intensity') } : {}),
+        ...readExtras(f),
       });
     }
     commit(); renderWeek();
@@ -582,7 +744,7 @@ const allSkip = (e) => [...new Set([...(e.skipDays || []), ...(state.restDays ||
 const planInputs = (key) => JSON.stringify({
   rest: state.restDays || [],
   r: usingCustom() ? state.routine : null,
-  p: state.profile, b: blocksFor(key), w: state.window,
+  p: state.profile, b: blocksFor(key), w: state.window, dw: dayWindows(state, key),
   busy: !!(state.history[key] && state.history[key].busy),
   skip: (state.history[key] && state.history[key].skipDays) || [],
 });
@@ -603,7 +765,7 @@ function ensurePlan(key) {
   if (!e.plan) {
     // A plan first made partway through the current week starts from today, so days already gone never show as missed.
     const midWeek = key === currentWeek() ? { fromDay: todayIndex(), nowMin: nowMin() } : {};
-    const res = planWeek(state.profile, blocksFor(key), state.window, { busy: e.busy, skipDays: allSkip(e), keys: keysFor(key, e.busy), keepOrder: keepOrder(), ...midWeek });
+    const res = planWithFlex(state.profile, blocksFor(key), state.window, { busy: e.busy, skipDays: allSkip(e), keys: keysFor(key, e.busy), keepOrder: keepOrder(), dayWindows: dayWindows(state, key), ...midWeek });
     e.plan = res.sessions;
     e.warnings = res.warnings;
     e.inputs = inputs;
@@ -619,12 +781,12 @@ function replan(key, missedKey = null) {
   const tIdx = todayIndex();
   const now = nowMin();
   const fixed = e.plan.filter((s) => s.key !== missedKey && (
-    s.pinned || e.done.includes(s.key) || s.day < tIdx || (s.day === tIdx && s.start <= now)));
+    s.pinned || s.locked || e.done.includes(s.key) || s.day < tIdx || (s.day === tIdx && s.start <= now)));
   const all = keysFor(key, e.busy);
   const target = all.length;
   const keys = all.filter((k) => !fixed.some((f) => f.key === k)).slice(0, Math.max(0, target - fixed.length));
-  const res = planWeek(state.profile, blocksFor(key), state.window, {
-    busy: e.busy, fixed, keys, fromDay: tIdx, nowMin: now, skipDays: allSkip(e), keepOrder: keepOrder(),
+  const res = planWithFlex(state.profile, blocksFor(key), state.window, {
+    busy: e.busy, fixed, keys, fromDay: tIdx, nowMin: now, skipDays: allSkip(e), keepOrder: keepOrder(), dayWindows: dayWindows(state, key),
   });
   e.plan = [...fixed, ...res.sessions].sort((a, b) => a.day - b.day);
   e.warnings = res.warnings;
@@ -697,6 +859,9 @@ const fmtLast = (sets, track) => setsText(sets.map((y) => normSet(y, track)), tr
 // Today's check-in for a session's day, and what it changes.
 const checkinFor = (s) => { const e = state.history[currentWeek()]; return (e && e.checkins && e.checkins[s.day]) || null; };
 const adjustFor = (s) => adjustment(checkinFor(s));
+// A lighter session the user accepted from a suggestion. A check-in adjustment takes over if there is one.
+const lightFor = (s) => { const e = state.history[currentWeek()]; return e && (e.lighten || []).includes(s.key) ? { setsMinus: 1, maxExercises: null, kgFactor: 0.9, note: 'Lighter session: one set less, about 10% lighter' } : null; };
+const adjOf = (s) => adjustFor(s) || lightFor(s);
 // Swapped exercises for this week: { [sessionKey]: { [originalMove]: newName } }
 const swapsFor = (s) => { const e = state.history[currentWeek()]; return (e && e.swaps && e.swaps[s.key]) || {}; };
 const applySwaps = (s, list) => {
@@ -707,7 +872,7 @@ const applySwaps = (s, list) => {
 const skippedFor = (s) => { const e = state.history[currentWeek()]; return (e && e.skips && e.skips[s.key]) || []; };
 const sessionExercises = (s, short) => {
   const list = short ? (s.exercises || []).slice(0, 3) : (s.exercises || []);
-  return applyAdjustment(applySwaps(s, list), adjustFor(s));
+  return applyAdjustment(applySwaps(s, list), adjOf(s));
 };
 const shownExercises = (s, short) => {
   const skipped = skippedFor(s);
@@ -760,9 +925,10 @@ function muscleChips(s, fr, max = 6) {
 function sessionNotesHtml(ctx, s) {
   const notes = [...(s.notes || [])];
   if (ctx.isShort(s)) notes.push('Short on time: first 3 exercises, 30 minutes');
-  const adj = adjustFor(s);
+  const adj = adjOf(s);
   if (adj) notes.push(adj.note);
-  return notes.length ? `<div class="notes">${notes.map((n) => `<span class="note ${/^(Short|Busy|Includes|Feeling|Light)/.test(n) ? 'short' : ''}">${esc(n)}</span>`).join('')}</div>` : '';
+  if (s.locked) notes.push('Locked: Slotted won’t suggest moving it');
+  return notes.length ? `<div class="notes">${notes.map((n) => `<span class="note ${/^(Short|Busy|Includes|Feeling|Light|Locked)/.test(n) ? 'short' : ''}">${esc(n)}</span>`).join('')}</div>` : '';
 }
 
 // Notes for a session that was moved by hand: sport on the day, and the next day's game.
@@ -796,7 +962,8 @@ function sessionActions(ctx, s, hero = false) {
           ${past ? '' : `<button type="button" data-short="${s.key}">${short ? 'Back to full session' : 'Short on time'}</button>`}
           ${past ? '' : `<button type="button" data-moveopen="${s.key}">Move to another day or time</button>`}
           <button type="button" data-missed="${s.key}">${s.day <= ctx.tIdx ? 'Missed it, move it' : 'Can’t make it, move it'}</button>
-          <button type="button" data-done="${s.key}">Mark done without logging</button>`}
+          <button type="button" data-done="${s.key}">Mark done without logging</button>
+          <button type="button" data-lock="${s.key}">${s.locked ? 'Unlock this workout' : 'Lock this workout'}</button>`}
       </div>
     </details>
   </div>
@@ -843,7 +1010,7 @@ function exerciseCards(s, key, short) {
     const lex = libFor(x);
     const track = trackOf(lex);
     const fields = fieldsFor(track);
-    const sug = suggestFor(x, key, s.key, (adjustFor(s) || {}).kgFactor || 1);
+    const sug = suggestFor(x, key, s.key, (adjOf(s) || {}).kgFactor || 1);
     const nDone = doneSets(sets).length;
     const i2 = info(x.move) || {};
     const muscles = Object.entries(musclesFor(x.move, x.name || i2.name, i2.group)).filter(([, w]) => w >= 1).map(([m]) => MUSCLE_LABEL[m] || MUSCLE_GROUPS[m]).filter(Boolean).join(', ');
@@ -1087,13 +1254,212 @@ function recapCard(key, nextUp, count) {
   </section>`;
 }
 
+
+// ---------- fatigue-aware suggestions ----------
+// App logic looks at the next two days: muscle recovery (estimated), today's check-in and what the
+// athlete said. It proposes moving, swapping, lightening or resting; nothing changes until accepted.
+function weekProposals(ctx, { withStrava = true } = {}) {
+  const e = ctx.entry;
+  const cache = new Map();
+  const freshAt = (day, start) => {
+    const k = `${day}|${start}`;
+    if (!cache.has(k)) {
+      const d = dayDate(ctx.key, day);
+      d.setHours(0, start, 0, 0);
+      const fr = freshnessNow({ at: d < today() ? today() : d, withStrava });
+      cache.set(k, Object.fromEntries(fr.muscles.map((m) => [m.id, m.fresh])));
+    }
+    return cache.get(k);
+  };
+  const info = exerciseInfo();
+  const mainGroups = (s) => [...new Set(shownExercises(s, false).flatMap((x) => {
+    const i = info(x.move) || {};
+    return Object.entries(musclesFor(x.move, x.name || i.name, i.group)).filter(([, w]) => w >= 1).map(([g]) => g);
+  }))];
+  const skip = allSkip(e);
+  const freeSlot = (d, len) => {
+    if (skip.includes(d)) return null;
+    const sl = bestSlot(blocksFor(ctx.key), d, winFor(ctx.key, d), len, state.profile.timeOfDay);
+    return sl && !sl.short ? { start: sl.start, end: sl.end } : null;
+  };
+  const fits = (d, a, z) => freeGaps(blocksFor(ctx.key), d, winFor(ctx.key, d)).some(([x, y]) => a >= x && z <= y);
+  return proposeChanges({
+    sessions: e.plan, todayIdx: ctx.tIdx, nowMin: ctx.now, isDone: ctx.isDone, mainGroups, freshAt,
+    labels: Object.fromEntries(MUSCLES.map((m) => [m.id, m.label])),
+    readiness: readiness(e.checkins && e.checkins[ctx.tIdx]), report: e.reports && e.reports[ctx.tIdx],
+    freeSlot, fits, dismissed: e.dismissed || [],
+  });
+}
+
+const slotText = (x) => `${DAYS_SHORT[x.day]} ${fmtTime(x.start)}`;
+function proposalsCard(ctx) {
+  const { proposals, notes } = weekProposals(ctx);
+  if (!proposals.length && !notes.length) return '';
+  return `<section class="card proposals" aria-labelledby="prop-h">
+    <div class="card-head"><h2 id="prop-h">Suggested changes</h2><span class="label">Nothing changes unless you accept</span></div>
+    ${proposals.map((p) => `<div class="proposal">
+      <b>${esc(p.title)}</b>
+      <p class="small">${esc(p.reason)}</p>
+      ${p.moves.length ? `<ul class="propmoves">${p.moves.map((m) => `<li><b>${esc(m.name)}</b> moves from ${slotText(m.from)} to ${slotText(m.to)}</li>`).join('')}</ul>` : ''}
+      <div class="actions"><button type="button" class="primary" data-propyes="${esc(p.id)}">Accept</button><button type="button" class="ghost" data-propno="${esc(p.id)}">No thanks</button></div>
+    </div>`).join('')}
+    ${notes.map((n) => `<p class="small muted">${esc(n)}</p>`).join('')}
+    <p class="rec-note">Based on estimates from your logged training and check-in, not a medical measurement. Commitments are never moved.</p>
+  </section>`;
+}
+
+function wireProposals(rerender) {
+  const ctx = weekCtx();
+  const e = ctx.entry;
+  app.querySelectorAll('[data-propyes]').forEach((b) => b.addEventListener('click', () => {
+    const p = weekProposals(ctx).proposals.find((x) => x.id === b.dataset.propyes);
+    if (!p) { rerender(); return; }
+    const out = applyProposal(e.plan, p, e.lighten || []);
+    e.plan = out.plan;
+    e.lighten = out.lightened;
+    for (const s of e.plan) if (p.keys.includes(s.key) && p.moves.length) s.notes = rebuildNotes(s, blocksFor(ctx.key));
+    commit(); rerender(); renderSideWeek();
+    toast(p.kind === 'lighten' ? `${p.title.replace(/^Make /, '').replace(/ lighter$/, '')} is now lighter` : 'Plan updated');
+  }));
+  app.querySelectorAll('[data-propno]').forEach((b) => b.addEventListener('click', () => {
+    e.dismissed = [...new Set([...(e.dismissed || []), b.dataset.propno])];
+    commit(); rerender();
+  }));
+}
+
+
+// ---------- timetable changes in plain words ----------
+// The athlete types a change ("I finish school at 1:05 on Tuesdays"). Slotted reads it (or asks the AI),
+// checks it, shows exactly what would change, and only applies it when they say so.
+let avail = { text: '', busy: false, changes: null, bad: [], note: '', done: '' };
+const AVAIL_EXAMPLES = ['I finish school at 1:05 pm every Tuesday', 'I can’t train this Saturday', 'Basketball training Thursday 4–6 pm', 'My legs are still sore and I’m exhausted'];
+
+// This week's plan as it would be under another state (same rules as replan, nothing saved).
+function simulatePlan(st, key) {
+  const e = (st.history || {})[key] || {};
+  const tIdx = todayIndex();
+  const now = nowMin();
+  const plan = e.plan || [];
+  const fixed = plan.filter((s) => s.pinned || s.locked || (e.done || []).includes(s.key) || s.day < tIdx || (s.day === tIdx && s.start <= now));
+  const all = keysFor(key, e.busy);
+  const keys = all.filter((k) => !fixed.some((f) => f.key === k)).slice(0, Math.max(0, all.length - fixed.length));
+  const skipDays = [...new Set([...(e.skipDays || []), ...(st.restDays || [])])];
+  const res = planWithFlex(st.profile, weekBlocks(st, key), st.window, { busy: e.busy, fixed, keys, fromDay: tIdx, nowMin: now, skipDays, keepOrder: keepOrder(), dayWindows: dayWindows(st, key) });
+  return { plan: [...fixed, ...res.sessions].sort((a, b) => a.day - b.day), fixed, warnings: res.warnings };
+}
+
+function planDiff(before, after) {
+  const out = [];
+  for (const a of after) {
+    const b = before.find((x) => x.key === a.key);
+    if (!b) out.push(`${a.name} added on ${slotText(a)}`);
+    else if (b.day !== a.day || b.start !== a.start) out.push(`${a.name} moves from ${slotText(b)} to ${slotText(a)}`);
+  }
+  for (const b of before) if (!after.some((a) => a.key === b.key)) out.push(`${b.name} on ${slotText(b)} no longer fits this week`);
+  return out;
+}
+
+function availPreview() {
+  const ctx = weekCtx();
+  if (avail.busy) return '<p class="small muted" role="status">Working it out…</p>';
+  if (avail.done) return `<div class="avail-done" role="status"><p class="small"><b>${esc(avail.done)}</b></p>${proposalsCard(ctx)}</div>`;
+  if (!avail.changes) return avail.note ? `<p class="small" role="status">${esc(avail.note)}</p>` : '';
+  const good = avail.changes;
+  if (!good.length) {
+    return `<div class="avail-preview" role="status"><p class="small">${esc(avail.note || 'Slotted couldn’t work out a change from that.')}</p>
+      ${avail.bad.length ? `<ul class="small">${avail.bad.map((b) => `<li>${esc(b)}</li>`).join('')}</ul>` : ''}
+      <p class="small muted">Try naming the day and time, like “I finish school at 2:30 on Wednesdays”, or change it below in My week.</p></div>`;
+  }
+  const next = applyChanges(state, good, ctx.key, ctx.tIdx);
+  const sim = simulatePlan(next, ctx.key);
+  const diff = planDiff(ctx.entry.plan, sim.plan);
+  // Locked or hand-placed sessions stay put; say so if a change now clashes with one.
+  const clashes = sim.fixed.filter((s) => !ctx.isDone(s) && !ctx.isPast(s)
+    && !freeGaps(weekBlocks(next, ctx.key), s.day, windowFor(next, ctx.key, s.day)).some(([a, z]) => s.start >= a && s.end <= z));
+  return `<div class="avail-preview" role="status">
+    <span class="label">What will change</span>
+    <ul class="propmoves">${good.map((c) => `<li>${esc(describeChange(c, ctx.key, ctx.tIdx))}${touchesFixed(c, state, ctx.key) ? ' <span class="badge">Fixed commitment</span>' : ''}</li>`).join('')}</ul>
+    ${avail.bad.length ? `<p class="small muted">Left out: ${esc(avail.bad.join(' '))}</p>` : ''}
+    <span class="label">This week’s plan</span>
+    ${diff.length ? `<ul class="propmoves">${diff.map((d) => `<li>${esc(d)}</li>`).join('')}</ul>` : '<p class="small">No sessions need to move.</p>'}
+    ${clashes.map((s) => `<p class="small note-warn">${esc(s.name)} is ${s.locked ? 'locked' : 'placed by hand'} on ${slotText(s)} and would clash. It stays put; move it yourself if you need to.</p>`).join('')}
+    ${good.some((c) => c.op === 'feel') ? '<p class="small muted">Slotted will then check whether any sessions should move or get lighter, and ask you first.</p>' : ''}
+    <div class="actions"><button type="button" class="primary" id="av-yes">Apply</button><button type="button" class="ghost" id="av-no">Cancel</button></div>
+  </div>`;
+}
+
+function availHtml() {
+  return `<section class="card stack avail" aria-labelledby="av-h">
+    <h2 id="av-h">Tell Slotted about a change</h2>
+    <p class="muted small">Type it the way you’d say it. You’ll see exactly what changes before anything happens.</p>
+    <form id="av-form" class="stack">
+      <label class="sr" for="av-text">Describe the change</label>
+      <textarea id="av-text" rows="2" maxlength="400" placeholder="I finish school at 1:05 pm on Tuesdays">${esc(avail.text)}</textarea>
+      <div class="avail-ex">${AVAIL_EXAMPLES.map((x) => `<button type="button" class="ghost" data-avex="${esc(x)}">${esc(x)}</button>`).join('')}</div>
+      <div class="actions"><button type="submit" class="primary">Check it</button></div>
+    </form>
+    <div id="av-out">${availPreview()}</div>
+  </section>`;
+}
+
+function wireAvail(rerender) {
+  const form = document.getElementById('av-form');
+  if (!form) return;
+  const text = document.getElementById('av-text');
+  app.querySelectorAll('[data-avex]').forEach((b) => b.addEventListener('click', () => { text.value = b.dataset.avex; avail.text = text.value; text.focus(); }));
+  text.addEventListener('input', () => { avail.text = text.value; });
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const ctx = weekCtx();
+    const said = text.value.trim();
+    if (!said) return;
+    avail = { text: said, busy: false, changes: null, bad: [], note: '', done: '' };
+    let { changes } = parseAvailability(said, { todayIdx: ctx.tIdx });
+    if (!changes.length) {
+      avail.busy = true; rerender();
+      const res = await askTimetable(said, timetableContext(state, ctx.key, ctx.tIdx));
+      avail.busy = false;
+      if (res.error) {
+        avail.changes = [];
+        avail.note = res.error === 'offline' ? 'You’re offline, and Slotted couldn’t read that on its own.' : 'Slotted couldn’t read that on its own, and the AI isn’t available right now.';
+        rerender(); return;
+      }
+      changes = res.changes;
+      avail.note = res.note;
+    }
+    const bad = [];
+    avail.changes = changes.filter((c) => {
+      const errs = validateChange(c, state, ctx.key);
+      if (errs.length) bad.push(errs[0]);
+      return !errs.length;
+    });
+    avail.bad = bad;
+    rerender();
+  });
+  const yes = document.getElementById('av-yes');
+  if (yes) yes.addEventListener('click', () => {
+    const ctx = weekCtx();
+    const list = avail.changes;
+    state = applyChanges(state, list, ctx.key, ctx.tIdx);
+    // Rebuild the weeks the changes touch (this week now; next week rebuilds itself when it starts).
+    replan(ctx.key);
+    commit();
+    avail = { text: '', busy: false, changes: null, bad: [], note: '', done: `Done: ${list.map((c) => describeChange(c, ctx.key, ctx.tIdx)).join('; ')}.` };
+    rerender(); renderSideWeek();
+  });
+  const no = document.getElementById('av-no');
+  if (no) no.addEventListener('click', () => { avail = { ...avail, changes: null, bad: [], note: '' }; rerender(); });
+  wireProposals(rerender);
+}
+
 // ---------- calendar ----------
 function calendarHtml(ctx) {
   const blocks = blocksFor(ctx.key);
   const stravaWeek = stravaFor(ctx.key);
   const rest = state.restDays || [];
-  const winStart = toMin(state.window.start);
-  const winEnd = toMin(state.window.end);
+  const ws = DAYS.map((_, d) => winFor(ctx.key, d));
+  const winStart = Math.min(...ws.map((w) => toMin(w.start)));
+  const winEnd = Math.max(...ws.map((w) => toMin(w.end)));
   const hourPx = 26;
   const height = ((winEnd - winStart) / 60) * hourPx;
   const y = (m) => ((m - winStart) / 60) * hourPx;
@@ -1237,6 +1603,7 @@ function renderPlan() {
       <button type="button" class="switch" id="busy" role="switch" aria-checked="${!!entry.busy}"><span class="track" aria-hidden="true"></span>Busy week</button>
     </div>
   </div>
+  ${proposalsCard(ctx)}
 
   <section class="card week-strip">
     <div class="big-count"><span class="num ${streak.thisWeekMet && justFinished ? 'streak-pop' : ''}">${counted}</span><span>of ${plural(target, 'session')}</span></div>
@@ -1354,6 +1721,13 @@ function wireSessionActions(rerender, opts = {}) {
     commit(); rerender();
   }));
 
+  app.querySelectorAll('[data-lock]').forEach((b) => b.addEventListener('click', () => {
+    const s = byKey(b.dataset.lock);
+    s.locked = !s.locked;
+    commit(); refresh();
+    toast(s.locked ? `${s.name} locked. Suggestions won’t move it.` : `${s.name} unlocked`);
+  }));
+
   app.querySelectorAll('[data-moveopen]').forEach((b) => b.addEventListener('click', () => { openMove = b.dataset.moveopen; rerender(); }));
   app.querySelectorAll('[data-movecancel]').forEach((b) => b.addEventListener('click', () => { openMove = null; rerender(); }));
   app.querySelectorAll('[data-movesave]').forEach((b) => b.addEventListener('click', () => {
@@ -1366,8 +1740,9 @@ function wireSessionActions(rerender, opts = {}) {
     const len = s.end - s.start;
     if (day === todayIndex() && start <= nowMin()) { err.textContent = 'Pick a time later today, or another day.'; return; }
     if (entry.plan.some((x) => x !== s && x.day === day)) { err.textContent = 'There’s already a session that day.'; return; }
-    const fits = freeGaps(blocksFor(key), day, state.window).some(([a, z]) => start >= a && start + len <= z);
-    if (!fits) { err.textContent = `That clashes with a commitment or falls outside your training hours (${fmtTime(toMin(state.window.start))} to ${fmtTime(toMin(state.window.end))}).`; return; }
+    const w = winFor(key, day);
+    const fits = freeGaps(blocksFor(key), day, w).some(([a, z]) => start >= a && start + len <= z);
+    if (!fits) { err.textContent = `That clashes with a commitment or falls outside your training hours (${fmtTime(toMin(w.start))} to ${fmtTime(toMin(w.end))}).`; return; }
     Object.assign(s, { day, start, end: start + len, pinned: true });
     s.notes = rebuildNotes(s, blocksFor(key));
     entry.plan.sort((a, z) => a.day - z.day);
@@ -1473,7 +1848,7 @@ function wireSessionActions(rerender, opts = {}) {
     const s = byKey(sk);
     const log = logFor(key, sk);
     for (const x of shownExercises(s, isShort(s))) {
-      const sug = suggestFor(x, key, sk, (adjustFor(s) || {}).kgFactor || 1);
+      const sug = suggestFor(x, key, sk, (adjOf(s) || {}).kgFactor || 1);
       log[x.move] = log[x.move] || [];
       for (let i = 0; i < x.sets; i++) {
         const cur = log[x.move][i] || {};
@@ -1493,6 +1868,7 @@ function wireSessionActions(rerender, opts = {}) {
 
   wireHoldTimers(rerender);
   wireEffort(rerender, key);
+  wireProposals(rerender);
 
   app.querySelectorAll('details.menu').forEach((m) => m.addEventListener('toggle', () => {
     if (m.open) app.querySelectorAll('details.menu[open]').forEach((o) => { if (o !== m) o.open = false; });
@@ -1695,6 +2071,7 @@ function renderHome() {
     ${todayOpen ? `<a class="btn primary big" href="${workoutHref(todays)}">${icon('play')}${loggedSets(key, todays, ctx.isShort(todays)) ? 'Continue today’s workout' : 'Start today’s workout'}</a>` : ''}
   </div>
   ${installBanner()}
+  ${(() => { const n = weekProposals(ctx).proposals.length; return n ? `<a class="card suggest-banner" href="#plan">${icon('spark')}<span><b>${n === 1 ? 'A suggested change' : `${n} suggested changes`} for your week</b><small>Based on your recovery and check-in. Open This week to accept or say no.</small></span></a>` : ''; })()}
   ${recapCard(key, ctx.nextUp, sessions.length)}
   ${stats}
   <div class="home-grid">
@@ -2892,12 +3269,14 @@ function coachContext() {
   const sport = blocksFor(key).filter((b) => b.type === 'sport');
   if (sport.length) lines.push(`Sport this week: ${sport.map((b) => `${DAYS_SHORT[b.day]} ${b.label} (${b.intensity === 'hard' ? 'game' : 'training'})`).join(', ')}.`);
   const other = blocksFor(key).filter((b) => b.type === 'work' || b.type === 'other');
-  if (other.length) lines.push(`Other commitments: ${other.map((b) => `${DAYS_SHORT[b.day]} ${b.label} ${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}`).join(', ')}.`);
+  if (other.length) lines.push(`Other commitments: ${other.map((b) => `${DAYS_SHORT[b.day]} ${b.label} ${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}${b.flex ? ' (flexible)' : ''}${b.once ? ' (this week only)' : ''}`).join(', ')}.`);
+  const school = blocksFor(key).filter((b) => b.type === 'school');
+  if (school.length) lines.push(`School: ${school.map((b) => `${DAYS_SHORT[b.day]} ${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}${b.once ? ' (this week only)' : ''}`).join(', ')}.`);
   if (entry.busy) lines.push('They marked this a busy week.');
   lines.push(`Sessions done this week: ${ctx.counted} of ${ctx.target}${ctx.credit ? ' (one counted from sport)' : ''}.`);
   lines.push('This week\'s sessions:');
   for (const s of entry.plan) {
-    const status = ctx.isDone(s) ? 'done' : ctx.isPast(s) ? 'not done' : s.day === tIdx ? 'today' : 'upcoming';
+    const status = `${ctx.isDone(s) ? 'done' : ctx.isPast(s) ? 'not done' : s.day === tIdx ? 'today' : 'upcoming'}${s.locked ? ', locked by the athlete' : ''}${lightFor(s) ? ', made lighter' : ''}`;
     lines.push(`- ${DAYS_SHORT[s.day]} ${fmtTime(s.start)} ${s.name} (${status}): ${shownExercises(s, ctx.isShort(s)).map((x) => `${x.name} ${x.sets}x${x.reps}`).join(', ')}`);
   }
   if (!entry.plan.length) lines.push('- none planned');
@@ -2908,6 +3287,11 @@ function coachContext() {
   if (r) lines.push(`Today's check-in: sleep ${QUESTIONS[0].options[c.sleep]}, soreness ${QUESTIONS[1].options[c.sore]}, energy ${QUESTIONS[2].options[c.energy]}${extrasText(c) ? `, ${extrasText(c)}` : ''}. Result: ${r.title}.`);
   const yc = entry.checkins && tIdx > 0 && entry.checkins[tIdx - 1];
   if (!r && readiness(yc)) lines.push(`Yesterday's check-in result: ${readiness(yc).title}${readiness(yc).reasons.length ? ` (${readiness(yc).reasons.join(', ')})` : ''}.`);
+  const said = entry.reports && entry.reports[tIdx];
+  if (said) lines.push(`What they told the app today: ${[said.sore && said.sore.length ? `${said.sore.join(', ')} sore` : '', said.tired ? 'very tired' : '', said.fresh && said.fresh.length ? `${said.fresh.join(', ')} feel recovered` : ''].filter(Boolean).join('; ')}.`);
+  // The app's own suggestions (from logged training and check-ins only; never Strava). The coach can explain them; the athlete accepts them on This week.
+  const sugg = weekProposals(ctx, { withStrava: false }).proposals;
+  if (sugg.length) lines.push(`Suggested changes the app is showing on This week (waiting for the athlete to accept or decline): ${sugg.map((p) => `${p.title}. ${p.reason}`).join(' | ')}`);
   const streak = streakInfo(state.history, key, targetFor, templateSport);
   const cons = consistency(data, key, 8, { targetFor, sportCreditFor: templateSport });
   lines.push(`Weekly streak: ${streak.current} weeks (longest ${streak.longest}).${cons.weeksJudged ? ` Weekly target hit in ${cons.weeksMet} of the last ${cons.weeksJudged} finished weeks.` : ''}`);
@@ -2999,7 +3383,7 @@ function renderCoach() {
       <p class="errors" id="coach-err" role="alert"></p>
       <p class="muted small">General training advice, not medical advice. For pain or injury, see a physio or GP.</p>
     </section>
-    ${coachSide()}
+    <div class="stack" style="margin-top:0">${coachSide()}${availHtml()}</div>
   </div>`;
 
   const log = document.getElementById('chatlog');
@@ -3051,6 +3435,7 @@ function renderCoach() {
   };
 
   form.addEventListener('submit', (e) => { e.preventDefault(); if (!coachCtl) ask(box.value); });
+  wireAvail(renderCoach);
   app.querySelectorAll('[data-starter]').forEach((b) => b.addEventListener('click', () => ask(b.dataset.starter)));
   const clear = document.getElementById('coach-clear');
   if (clear) clear.addEventListener('click', () => { state.coach.turns = []; commit(); renderCoach(); });

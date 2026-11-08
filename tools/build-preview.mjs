@@ -7,7 +7,7 @@ const stripModule = (src) => src
   .replace(/^import[\s\S]*?from\s+['"][^'"]+['"];\n/gm, '')
   .replace(/^export\s+(?=(const|function|let|class|async))/gm, '');
 
-const js = ['js/exercises.js', 'js/units.js', 'js/scheduler.js', 'js/anatomy.js', 'js/freshness.js', 'js/progress.js', 'js/tracking.js', 'js/stats.js', 'js/workout.js', 'js/readiness.js', 'js/coach.js', 'js/store.js', 'js/sync.js', 'js/app.js'].map((f) => `// ---- ${f} ----\n${stripModule(read(f))}`).join('\n');
+const js = ['js/exercises.js', 'js/units.js', 'js/scheduler.js', 'js/anatomy.js', 'js/freshness.js', 'js/progress.js', 'js/tracking.js', 'js/stats.js', 'js/workout.js', 'js/timetable.js', 'js/adjust.js', 'js/readiness.js', 'js/coach.js', 'js/store.js', 'js/sync.js', 'js/app.js'].map((f) => `// ---- ${f} ----\n${stripModule(read(f))}`).join('\n');
 const html = read('index.html');
 const body = html.slice(html.indexOf('<div class="shell">'), html.indexOf('<script type="module"'));
 
