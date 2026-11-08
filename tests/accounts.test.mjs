@@ -184,6 +184,24 @@ test('without setup, sign-in says so instead of breaking', async () => {
   assert.deepEqual(who, { signedIn: false, available: false });
 });
 
+test('half-finished setup (no client secret) hides sign-in instead of showing a button that fails', async () => {
+  const { GOOGLE_CLIENT_SECRET, ...partial } = env;
+  assert.equal((await start.onRequestGet({ request: get('/api/auth/google/start'), env: partial })).status, 503);
+  const who = await (await me.onRequestGet({ request: get('/api/me'), env: partial })).json();
+  assert.equal(who.available, false);
+});
+
+test('signing in removes that person’s expired sessions, and keeps live ones', async () => {
+  const { cookie } = await signIn('tidy');
+  const uid = env.DB.raw.prepare('SELECT id FROM users').get().id;
+  env.DB.raw.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)').run('old', uid, 1);
+  await signIn('tidy');
+  const hashes = env.DB.raw.prepare('SELECT token_hash FROM sessions').all().map((r) => r.token_hash);
+  assert.ok(!hashes.includes('old'), 'expired session removed');
+  assert.equal(hashes.length, 2, 'both live sessions stay');
+  assert.equal((await (await me.onRequestGet({ request: get('/api/me', cookie), env })).json()).signedIn, true);
+});
+
 test('a non-race Strava activity is not marked hard', () => {
   assert.equal(simplify({ id: 1, sport_type: 'Ride', start_date_local: '2026-11-04T17:00:00Z', moving_time: 3600 }).hard, false);
 });
