@@ -2722,7 +2722,7 @@ function renderExerciseForm(editing) {
       <p class="hint" style="margin:0 0 10px">Main muscles do most of the work. Helpers assist, stabilisers hold you steady. These drive the recovery map, so check them.</p>
       <div class="mgrid">
         ${byGroup.map(([g, ms]) => `<div class="mgroup"><b>${esc(MUSCLE_GROUPS[g])}</b>${ms.map(([id, m]) => `
-          <label class="mrow"><span>${esc(m.label)}</span><select data-muscle="${id}" aria-label="${esc(m.label)}">${opt('', '—', roleOfId(id))}${opt('primary', 'Main', roleOfId(id))}${opt('secondary', 'Helper', roleOfId(id))}${opt('stabilisers', 'Stabiliser', roleOfId(id))}</select></label>`).join('')}</div>`).join('')}
+          <label class="xf-mrow"><span>${esc(m.label)}</span><select data-muscle="${id}" aria-label="${esc(m.label)}">${opt('', '—', roleOfId(id))}${opt('primary', 'Main', roleOfId(id))}${opt('secondary', 'Helper', roleOfId(id))}${opt('stabilisers', 'Stabiliser', roleOfId(id))}</select></label>`).join('')}</div>`).join('')}
       </div>
     </fieldset>
     <div class="field"><label class="label" for="xf-cue">How to do it (optional)</label><textarea id="xf-cue" rows="2" maxlength="300">${esc(base.cue || '')}</textarea></div>

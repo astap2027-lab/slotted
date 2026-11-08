@@ -853,6 +853,6 @@ body.focus .rest { bottom: calc(86px + env(safe-area-inset-bottom, 0px)); }
 .mgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
 .mgroup { display: grid; gap: 6px; padding: 12px; border-radius: var(--r-md); background: var(--surface-2); align-content: start; }
 .mgroup > b { font-size: 14.5px; }
-.mrow { display: grid; grid-template-columns: minmax(0, 1fr) 128px; gap: 8px; align-items: center; font-size: 14.5px; }
-.mrow select { min-height: 40px; padding-top: 6px; padding-bottom: 6px; font-size: 14.5px; background-color: var(--surface); }
+.xf-mrow { display: grid; grid-template-columns: minmax(0, 1fr) 128px; gap: 8px; align-items: center; font-size: 14.5px; }
+.xf-mrow select { min-height: 40px; padding-top: 6px; padding-bottom: 6px; font-size: 14.5px; background-color: var(--surface); }
 .libstats dd { font-size: 18px; font-weight: 600; font-stretch: 100%; }
