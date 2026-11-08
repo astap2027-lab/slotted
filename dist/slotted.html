@@ -860,9 +860,39 @@ body.focus .rest { bottom: calc(86px + env(safe-area-inset-bottom, 0px)); }
 .mgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
 .mgroup { display: grid; gap: 6px; padding: 12px; border-radius: var(--r-md); background: var(--surface-2); align-content: start; }
 .mgroup > b { font-size: 14.5px; }
-.mrow { display: grid; grid-template-columns: minmax(0, 1fr) 128px; gap: 8px; align-items: center; font-size: 14.5px; }
-.mrow select { min-height: 40px; padding-top: 6px; padding-bottom: 6px; font-size: 14.5px; background-color: var(--surface); }
+.xf-mrow { display: grid; grid-template-columns: minmax(0, 1fr) 128px; gap: 8px; align-items: center; font-size: 14.5px; }
+.xf-mrow select { min-height: 40px; padding-top: 6px; padding-bottom: 6px; font-size: 14.5px; background-color: var(--surface); }
 .libstats dd { font-size: 18px; font-weight: 600; font-stretch: 100%; }
+
+/* ---------- Stage 2: check-in extras, effort, detailed muscles ---------- */
+.ci-opts.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.ci-more summary { cursor: pointer; font-size: 14.5px; color: var(--text-2); padding: 4px 0; }
+.ci-more[open] summary { margin-bottom: 8px; }
+.ci-more .ci-row + .ci-row { margin-top: 8px; }
+@media (max-width: 520px) { .ci-row { grid-template-columns: 1fr; gap: 6px; } .ci-opts button { font-size: 14px; } }
+
+.effort { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; padding-top: 4px; }
+.effort-opts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; flex: 1 1 260px; max-width: 360px; }
+.effort-opts button { min-height: 40px; padding: 6px 8px; font-size: 14.5px; font-weight: 500; background: var(--surface-2); }
+.effort-opts button[aria-pressed='true'] { background: var(--text); color: var(--bg); border-color: var(--text); }
+td .effort { margin-top: 6px; }
+td .effort-opts { max-width: 300px; }
+
+.parts { display: grid; gap: 2px; margin-top: 6px; }
+.part { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 10px; align-items: center; width: 100%; text-align: left; min-height: 44px; padding: 8px 10px; border: 0; border-radius: var(--r-sm); background: transparent; font-weight: 500; }
+.part:hover { background: var(--surface-3); }
+.part[aria-expanded='true'] { background: var(--surface-3); }
+.part b { font-weight: 800; font-stretch: 75%; font-size: 19px; font-variant-numeric: tabular-nums; }
+.partdetail { display: grid; gap: 10px; padding: 10px 12px 14px 32px; }
+.partdetail.inline { padding: 0; }
+.partwork { display: grid; gap: 4px; }
+.partwork li { display: flex; justify-content: space-between; gap: 10px; font-size: 14px; flex-wrap: wrap; }
+.trend { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; max-width: 320px; }
+.tcol { display: grid; gap: 4px; justify-items: center; }
+.tbar { position: relative; width: 100%; max-width: 26px; height: 48px; border-radius: 5px; background: var(--surface); overflow: hidden; }
+.tbar i { position: absolute; left: 0; right: 0; bottom: 0; height: var(--h); border-radius: 5px; }
+.tcol small { font-size: 11.5px; color: var(--text-3); }
+.tbar i.l0 { background: var(--rec-0); } .tbar i.l1 { background: var(--rec-1); } .tbar i.l2 { background: var(--rec-2); } .tbar i.l3 { background: var(--rec-3); }
 
 </style>
 <div class="shell">
@@ -2080,6 +2110,9 @@ const BACK = [{"muscle": null, "points": ["506 0 460 9 409 55 404 128 451 200 55
 // Muscle freshness: an estimate of how recovered each muscle is, built only from what was recorded:
 // ticked sets, sessions marked done, and Strava activities. Each hard set adds load to the muscles it
 // works; load fades over the following days. Freshness = how much of that load is gone.
+// Every detailed muscle (quads, hamstrings and so on, down to each head) is tracked on its own; the
+// body-map groups show their most tired muscle. How hard a set was (weight against your best, time,
+// distance, and the optional effort tap) scales its load, and a big recent week slows recovery a little.
 
 const MUSCLES = [
   { id: 'chest', label: 'Chest', recoverHours: 30, full: 12 },
@@ -2092,7 +2125,46 @@ const MUSCLES = [
   { id: 'hamstrings', label: 'Hamstrings', recoverHours: 32, full: 11 },
   { id: 'glutes', label: 'Glutes', recoverHours: 30, full: 12 },
   { id: 'calves', label: 'Calves', recoverHours: 22, full: 10 },
+  { id: 'forearms', label: 'Forearms', recoverHours: 20, full: 9 },
+  { id: 'hips', label: 'Hips', recoverHours: 24, full: 10 },
+  { id: 'shins', label: 'Shins', recoverHours: 20, full: 8 },
 ];
+// Body-map groups drawn on the outline. The others (forearms, hips, shins) are listed but not drawn.
+const MAP_GROUPS = new Set(['chest', 'shoulders', 'back', 'biceps', 'triceps', 'core', 'quads', 'hamstrings', 'glutes', 'calves']);
+// Every detailed muscle, recovering at its group's pace.
+const PARTS = Object.entries(MUSCLE_INFO).map(([id, m]) => ({ id, label: m.label, group: m.group }));
+const PARTS_OF = PARTS.reduce((o, p) => ((o[p.group] = o[p.group] || []).push(p.id), o), {});
+
+// How much one tap of effort changes a set's load. No tap means a normal hard set.
+const EFFORT = { easy: { label: 'Easy', factor: 0.7 }, hard: { label: 'Hard', factor: 1 }, fail: { label: 'To failure', factor: 1.2 } };
+const fClamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const fE1rm = (kg, reps) => (kg > 0 && reps > 0 ? kg * (1 + Math.min(reps, 15) / 30) : 0);
+
+// How hard one set was compared with a normal working set (1). ref = best estimated 1-rep max on this exercise.
+function setLoad(set, track, ref = 0, assisted = false) {
+  if (!set) return 0;
+  let f = (EFFORT[set.effort] || EFFORT.hard).factor;
+  const kg = Number(set.kg) || 0;
+  const reps = Number(set.reps) || 0;
+  if ((track === 'weight_reps' || track === 'reps' || !track) && kg > 0 && ref > 0 && !assisted) {
+    // Light sets count for less; sets near your best count in full.
+    f *= fClamp(0.6 + 0.45 * (fE1rm(kg, reps) / ref), 0.6, 1.05);
+  } else if (track === 'duration' || track === 'weight_duration') {
+    f *= fClamp(secOf(set, track) / 40, 0.5, 1.3);
+  } else if (track === 'distance_duration' || track === 'weight_distance') {
+    f *= fClamp((Number(set.m) || 0) / 40, 0.5, 1.3);
+  }
+  return fClamp(f, 0.3, 1.5);
+}
+
+// Detailed muscles an exercise works. Exercises outside the library spread their group weights over the group.
+function partsFor(move, name, group) {
+  const ex = exerciseForMove(move, name);
+  if (ex) return muscleWeights(ex);
+  const out = {};
+  for (const [g, w] of Object.entries(musclesFor(move, name, group))) for (const id of PARTS_OF[g] || []) out[id] = Math.max(out[id] || 0, w);
+  return out;
+}
 
 // How much each set of a movement works each muscle (1 = main muscle).
 const MOVE_MUSCLES = {
@@ -2175,6 +2247,19 @@ const atTime = (weekStart, day, minutes) => {
   return d;
 };
 
+// Best estimated 1-rep max for each logged move, so a set can be compared with what you can lift.
+function bestRefs(log) {
+  const ref = {};
+  for (const sessions of Object.values(log || {})) {
+    for (const moves of Object.values(sessions || {})) {
+      for (const [move, list] of Object.entries(moves || {})) {
+        for (const x of list || []) if (x && x.done) ref[move] = Math.max(ref[move] || 0, fE1rm(Number(x.kg) || 0, Number(x.reps) || 0));
+      }
+    }
+  }
+  return ref;
+}
+
 /**
  * @param data.log        state.log
  * @param data.history    state.history (for when each session was planned and which were marked done)
@@ -2184,41 +2269,43 @@ const atTime = (weekStart, day, minutes) => {
  * @param data.now        Date
  */
 function computeFreshness({ log = {}, history = {}, weekStart, exercise = () => ({}), activities = [], now = new Date() }) {
-  const load = Object.fromEntries(MUSCLES.map((m) => [m.id, 0]));
-  const last = {};
   const spec = Object.fromEntries(MUSCLES.map((m) => [m.id, m]));
+  const groupOf = Object.fromEntries(PARTS.map((p) => [p.id, p.group]));
+  const windowStart = now.getTime() - 7 * 864e5;
+  const work = []; // { parts: { id: weight }, amount, t }
   let sets = 0;
   let sessions = 0;
   let recentActivities = 0;
-  const windowStart = now.getTime() - 7 * 864e5;
+  const refs = bestRefs(log);
 
-  // Adds load and returns true when the work falls inside the 7-day window.
-  const add = (muscles, amount, when) => {
+  // Records work and returns true when it falls inside the 7-day window.
+  // Work later today counts now (sets can be ticked before the planned start); work on a later day doesn't count yet.
+  const dayEnd = new Date(now).setHours(23, 59, 59, 999);
+  const add = (parts, amount, when) => {
+    if (when.getTime() > dayEnd) return false;
     const t = Math.min(when.getTime(), now.getTime());
     if (t < windowStart || amount <= 0) return false;
-    const hours = (now.getTime() - t) / 36e5;
-    for (const [id, w] of Object.entries(muscles)) {
-      if (!spec[id]) continue;
-      load[id] += amount * w * Math.exp(-hours / spec[id].recoverHours);
-      if (w >= 0.5 && (!last[id] || t > last[id])) last[id] = t;
-    }
+    work.push({ parts, amount, t });
     return true;
   };
 
   for (const [wk, wkSessions] of Object.entries(history)) {
     const plan = wkSessions.plan || [];
     const logged = log[wk] || {};
-    // Ticked sets.
+    // Ticked sets, each scaled by how hard it was.
     for (const [sk, moves] of Object.entries(logged)) {
       const s = plan.find((p) => p.key === sk);
       const when = atTime(weekStart(wk), s ? s.day : 0, s ? s.start : null);
       let counted = false;
       for (const [move, list] of Object.entries(moves)) {
-        const done = (list || []).filter((x) => x && x.done).length;
-        if (!done) continue;
+        const done = (list || []).filter((x) => x && x.done);
+        if (!done.length) continue;
         const info = exercise(move) || {};
-        if (!add(musclesFor(move, info.name, info.group), done, when)) continue;
-        sets += done;
+        const ex = exerciseForMove(move, info.name);
+        const track = ex ? trackOf(ex) : null;
+        const amount = done.reduce((t, x) => t + setLoad(x, track, refs[move], !!(ex && ex.load === 'assisted')), 0);
+        if (!add(partsFor(move, info.name, info.group), amount, when)) continue;
+        sets += done.length;
         counted = true;
       }
       if (counted) sessions++;
@@ -2232,7 +2319,7 @@ function computeFreshness({ log = {}, history = {}, weekStart, exercise = () => 
       let counted = false;
       for (const x of s.exercises) {
         const info = exercise(x.move) || {};
-        if (add(musclesFor(x.move, x.name || info.name, info.group), Number(x.sets) || 0, when)) counted = true;
+        if (add(partsFor(x.move, x.name || info.name, info.group), Number(x.sets) || 0, when)) counted = true;
       }
       if (counted) sessions++;
     }
@@ -2243,17 +2330,45 @@ function computeFreshness({ log = {}, history = {}, weekStart, exercise = () => 
     const [y, m, d] = a.date.split('-').map(Number);
     const [hh, mm] = String(a.start || '12:00').split(':').map(Number);
     const { muscles, sets: amount } = activityLoad(a);
-    if (add(muscles, amount, new Date(y, m - 1, d, hh, mm))) recentActivities++;
+    const parts = {};
+    for (const [g, w] of Object.entries(muscles)) for (const id of PARTS_OF[g] || []) parts[id] = w;
+    if (add(parts, amount, new Date(y, m - 1, d, hh, mm))) recentActivities++;
   }
 
-  const muscles = MUSCLES.map((m) => ({
-    id: m.id,
-    label: m.label,
-    fresh: Math.round(100 * (1 - Math.min(1, load[m.id] / m.full))),
-    lastWorked: last[m.id] ? new Date(last[m.id]) : null,
-  }));
+  // Recent volume per muscle (undecayed). A week well past a muscle's usual full load slows its recovery.
+  const vol = {};
+  for (const w of work) for (const [id, wt] of Object.entries(w.parts)) vol[id] = (vol[id] || 0) + w.amount * wt;
+  const load = {};
+  const last = {};
+  for (const w of work) {
+    const hours = (now.getTime() - w.t) / 36e5;
+    for (const [id, wt] of Object.entries(w.parts)) {
+      const g = spec[groupOf[id]];
+      if (!g) continue;
+      const slow = 1 + 0.3 * fClamp(((vol[id] || 0) - g.full) / g.full, 0, 1);
+      load[id] = (load[id] || 0) + w.amount * wt * Math.exp(-hours / (g.recoverHours * slow));
+      if (wt >= 0.5 && (!last[id] || w.t > last[id])) last[id] = w.t;
+    }
+  }
+
+  const detail = PARTS.map((p) => {
+    const g = spec[p.group];
+    return {
+      id: p.id, label: p.label, group: p.group,
+      fresh: Math.round(100 * (1 - Math.min(1, (load[p.id] || 0) / g.full))),
+      lastWorked: last[p.id] ? new Date(last[p.id]) : null,
+      volume: Math.round((vol[p.id] || 0) * 10) / 10,
+    };
+  });
+  // Each body-map group shows its most tired muscle, so a group is never shown fresher than any part of it.
+  const muscles = MUSCLES.map((m) => {
+    const parts = detail.filter((p) => p.group === m.id);
+    const worst = parts.reduce((a, b) => (b.fresh < a.fresh ? b : a), parts[0]);
+    const lastT = Math.max(0, ...parts.map((p) => (p.lastWorked ? p.lastWorked.getTime() : 0)));
+    return { id: m.id, label: m.label, fresh: worst ? worst.fresh : 100, lastWorked: lastT ? new Date(lastT) : null, parts: parts.map((p) => p.id) };
+  });
   // Counts only cover the 7-day window, so they match what the estimate is built from.
-  return { muscles, sets, sessions, activities: recentActivities, hasData: sets > 0 || sessions > 0 || recentActivities > 0 };
+  return { muscles, detail, sets, sessions, activities: recentActivities, hasData: sets > 0 || sessions > 0 || recentActivities > 0 };
 }
 
 const freshnessLevel = (pct) => (pct >= 85 ? 0 : pct >= 65 ? 1 : pct >= 40 ? 2 : 3);
@@ -2490,6 +2605,8 @@ const ticked = (list) => (list || []).filter((s) => s && s.done);
 const kgOf = (s) => Number(s.kg) || 0;
 const repsOf = (s) => Number(s.reps) || 0;
 const unique = (arr) => [...new Set(arr || [])];
+// Sessions later today still count as today's work (sets can be ticked before the planned start time).
+const endOfDay = (d) => new Date(d).setHours(23, 59, 59, 999);
 
 // When a planned session took place: Monday of its week plus its day, at its start time.
 function sessionDate(wk, s) {
@@ -2657,7 +2774,7 @@ function muscleWork({ history = {}, log = {} }, muscle, now, days = 7, exercise 
     for (const [sk, moves] of Object.entries(sessions || {})) {
       const s = plan.find((p) => p.key === sk);
       const date = sessionDate(wk, s);
-      if (date.getTime() < from || date.getTime() > now.getTime()) continue;
+      if (date.getTime() < from || date.getTime() > endOfDay(now)) continue;
       for (const [move, list] of Object.entries(moves || {})) {
         const sets = ticked(list);
         if (!sets.length) continue;
@@ -2677,6 +2794,40 @@ function hoursUntilFresh(freshAt, now, threshold = 85, stepHours = 3, maxHours =
     if (freshAt(new Date(now.getTime() + h * 36e5)) >= threshold) return h;
   }
   return null;
+}
+
+// ---------- detailed muscles ----------
+// Logged work that hit one detailed muscle (for example vastus lateralis), newest first, with its role.
+function partWork({ history = {}, log = {} }, part, now, days = 14, exercise = () => ({})) {
+  const from = now.getTime() - days * 864e5;
+  const out = [];
+  for (const [wk, sessions] of Object.entries(log)) {
+    const plan = (history[wk] && history[wk].plan) || [];
+    for (const [sk, moves] of Object.entries(sessions || {})) {
+      const s = plan.find((p) => p.key === sk);
+      const date = sessionDate(wk, s);
+      if (date.getTime() < from || date.getTime() > endOfDay(now)) continue;
+      for (const [move, list] of Object.entries(moves || {})) {
+        const sets = ticked(list);
+        if (!sets.length) continue;
+        const info = exercise(move) || {};
+        const w = partsFor(move, info.name, info.group)[part] || 0;
+        if (!w) continue;
+        const ex = exerciseForMove(move, info.name);
+        const role = ex ? roleOf(ex, part) : w >= 1 ? 'primary' : w >= 0.5 ? 'secondary' : 'stabiliser';
+        out.push({ date, session: s ? s.name : '', name: info.name || (ex && ex.name) || move, sets: sets.length, role, weight: w });
+      }
+    }
+  }
+  return out.sort((a, b) => b.date - a.date);
+}
+
+// Weighted sets for one detailed muscle between two times (a helper set counts half, as in recovery).
+function partVolume(data, part, from, to, exercise = () => ({})) {
+  const days = Math.ceil((to - from) / 864e5) + 1;
+  return Math.round(partWork(data, part, new Date(to), days, exercise)
+    .filter((w) => w.date.getTime() >= from)
+    .reduce((t, w) => t + w.sets * w.weight, 0) * 10) / 10;
 }
 
 // ---- js/workout.js ----
@@ -2790,26 +2941,41 @@ function weekRecap({ history = {}, log = {}, prevKey, targetFor, sportCreditFor 
 
 // ---- js/readiness.js ----
 // Daily check-in: three quick answers decide how hard today's session should be.
+// Four more are optional (sleep hours, tiredness, stress, how ready you feel) and only nudge the result.
 const QUESTIONS = [
   { id: 'sleep', label: 'Sleep', options: ['Good', 'OK', 'Bad'] },
   { id: 'sore', label: 'Soreness', options: ['Fresh', 'A bit sore', 'Very sore'] },
   { id: 'energy', label: 'Energy', options: ['High', 'Normal', 'Low'] },
 ];
 
+const EXTRAS = [
+  { id: 'hours', label: 'Hours slept', options: ['Under 6', '6 to 7', '7 to 8', 'Over 8'], worst: 0, reason: 'under 6 hours of sleep' },
+  { id: 'tired', label: 'Tiredness', options: ['Not tired', 'A bit', 'Very'], worst: 2, reason: 'very tired' },
+  { id: 'stress', label: 'Stress', options: ['Low', 'Some', 'High'], worst: 2, reason: 'high stress' },
+  { id: 'ready', label: 'Feel ready?', options: ['Ready', 'Not sure', 'Not really'], worst: 2, reason: 'not feeling ready' },
+];
+const answered = (v, n) => Number.isInteger(v) && v >= 0 && v < n;
+
 const complete = (c) => !!c && QUESTIONS.every((q) => c[q.id] === 0 || c[q.id] === 1 || c[q.id] === 2);
 
 // Each answer scores 0 (good) to 2 (bad). Very sore or two bad answers means a rough day.
 function readiness(c) {
   if (!complete(c)) return null;
-  const score = QUESTIONS.reduce((t, q) => t + c[q.id], 0);
+  // Each optional answer at its worst adds half a point; leaving them out changes nothing.
+  const extraBad = EXTRAS.filter((q) => answered(c[q.id], q.options.length) && c[q.id] === q.worst);
+  const score = QUESTIONS.reduce((t, q) => t + c[q.id], 0) + extraBad.length * 0.5;
   const bad = QUESTIONS.filter((q) => c[q.id] === 2).length;
+  const reasons = [
+    ...QUESTIONS.filter((q) => c[q.id] === 2).map((q) => ({ sleep: 'bad sleep', sore: 'very sore', energy: 'low energy' }[q.id])),
+    ...extraBad.map((q) => q.reason),
+  ];
   const level = score >= 4 || bad >= 2 || c.sore === 2 ? 'rough' : score >= 2 ? 'easy' : 'good';
   const copy = {
     good: { title: 'Good to go', text: 'Train as planned. If the first sets feel easy, it’s a good day to push.' },
     easy: { title: 'Take it a bit easier', text: 'One set less on each exercise today. Same weights, focus on clean reps.' },
     rough: { title: 'Rough day', text: 'A light session still counts, or take the day off and Slotted moves this workout.' },
   }[level];
-  return { score, level, ...copy };
+  return { score, level, reasons, ...copy };
 }
 
 // How today's session changes. Rough days need a choice: a light session, or rest (handled by re-planning).
@@ -2826,6 +2992,12 @@ function applyAdjustment(exercises, adj) {
   if (!adj) return exercises;
   const list = adj.maxExercises ? exercises.slice(0, adj.maxExercises) : exercises;
   return list.map((x) => ({ ...x, sets: Math.max(2, x.sets - adj.setsMinus) }));
+}
+
+// The optional answers written out, for the coach.
+function extrasText(c) {
+  if (!c) return '';
+  return EXTRAS.filter((q) => answered(c[q.id], q.options.length)).map((q) => `${q.label.toLowerCase()} ${q.options[c[q.id]].toLowerCase()}`).join(', ');
 }
 
 // ---- js/coach.js ----
@@ -3915,8 +4087,28 @@ function exerciseCards(s, key, short) {
           </div>`;
         }).join('')}
       </div>
+      ${nDone >= x.sets ? effortHtml(s.key, x.move, sets, x.name) : ''}
     </li>`;
   }).join('');
+}
+
+// ---------- effort ----------
+// One optional tap per exercise once its sets are done. No tap means a normal hard set.
+function effortHtml(sk, move, sets, name) {
+  const cur = (doneSets(sets)[0] || {}).effort || '';
+  return `<div class="effort" role="group" aria-label="How hard was ${esc(name)}?">
+    <span class="small muted">How hard was it? <span class="faint">Optional</span></span>
+    <div class="effort-opts">${Object.entries(EFFORT).map(([k, v]) => `<button type="button" data-effort="${esc(sk)}|${esc(move)}|${k}" aria-pressed="${cur === k}">${v.label}</button>`).join('')}</div>
+  </div>`;
+}
+function wireEffort(rerender, wk) {
+  app.querySelectorAll('[data-effort]').forEach((b) => b.addEventListener('click', () => {
+    const [sk, move, level] = b.dataset.effort.split('|');
+    const list = logFor(wk, sk)[move] || [];
+    const same = doneSets(list).every((x) => x.effort === level);
+    for (const x of list) if (x && x.done) { if (same) delete x.effort; else x.effort = level; }
+    commit(); rerender();
+  }));
 }
 
 // ---------- hold timer ----------
@@ -4040,25 +4232,34 @@ function sessionComplete(s, key, short) {
   return shownExercises(s, short).every((x) => doneSets(log[x.move]).length >= x.sets);
 }
 
-function checkinBlock(s) {
-  const c = checkinFor(s) || {};
+// The daily check-in. Three quick answers; four more are optional and tucked away.
+// Works for a session (s) or, on a rest day, for just the day.
+function checkinBlock(s, day = s ? s.day : todayIndex()) {
+  const e = state.history[currentWeek()];
+  const c = (e && e.checkins && e.checkins[day]) || {};
   const r = readiness(c);
-  if (!r) {
-    return `<div class="checkin" data-checkin="${s.key}">
-      <p class="ci-title">How are you feeling today?</p>
-      ${QUESTIONS.map((q) => `<div class="ci-row" role="group" aria-label="${q.label}">
+  const extrasDone = EXTRAS.filter((q) => Number.isInteger(c[q.id])).length;
+  const row = (q) => `<div class="ci-row" role="group" aria-label="${q.label}">
         <span class="ci-label">${q.label}</span>
-        <div class="ci-opts">${q.options.map((o, i) => `<button type="button" data-ci="${q.id}|${i}" aria-pressed="${c[q.id] === i}">${esc(o)}</button>`).join('')}</div>
-      </div>`).join('')}
+        <div class="ci-opts${q.options.length > 3 ? ' four' : ''}">${q.options.map((o, i) => `<button type="button" data-ci="${q.id}|${i}" aria-pressed="${c[q.id] === i}">${esc(o)}</button>`).join('')}</div>
+      </div>`;
+  const more = `<details class="ci-more"${extrasDone ? ' open' : ''}><summary>More detail (optional)${extrasDone ? `, ${extrasDone} of ${EXTRAS.length} answered` : ''}</summary>${EXTRAS.map(row).join('')}</details>`;
+  const attrs = `data-checkin="${s ? s.key : ''}" data-ciday="${day}"`;
+  if (!r) {
+    return `<div class="checkin" ${attrs}>
+      <p class="ci-title">How are you feeling today?</p>
+      ${QUESTIONS.map(row).join('')}
+      ${more}
     </div>`;
   }
-  return `<div class="checkin result ${r.level}" data-checkin="${s.key}">
+  return `<div class="checkin result ${r.level}" ${attrs}>
     <p class="ci-title">${esc(r.title)}</p>
-    <p class="small">${esc(r.text)}</p>
+    <p class="small">${esc(s ? r.text : { good: 'Enjoy the rest day.', easy: 'A quiet day helps. Slotted keeps this in mind for your next session.', rough: 'Rest up. If you’re still feeling this way tomorrow, your next session can be lighter.' }[r.level])}</p>
+    ${more}
     <div class="ci-actions">
-      ${r.level === 'rough' && !c.choice ? `<button type="button" class="primary" data-ci="choice|light">Light session</button><button type="button" data-ci="choice|rest">Rest today</button>` : ''}
+      ${s && r.level === 'rough' && !c.choice ? `<button type="button" class="primary" data-ci="choice|light">Light session</button><button type="button" data-ci="choice|rest">Rest today</button>` : ''}
       <button type="button" class="ghost" data-ci="reset|0">Change answers</button>
-      ${askBtn(`My check-in today says ${r.title.toLowerCase()}. Should I adjust today's session?`, 'Ask the coach')}
+      ${askBtn(s ? `My check-in today says ${r.title.toLowerCase()}. Should I adjust today's session?` : `My check-in today says ${r.title.toLowerCase()}. How should I plan my next session?`, 'Ask the coach')}
     </div>
   </div>`;
 }
@@ -4336,13 +4537,17 @@ function wireSessionActions(rerender, opts = {}) {
 
   app.querySelectorAll('[data-ci]').forEach((b) => b.addEventListener('click', () => {
     const [field, val] = b.dataset.ci.split('|');
-    const s = byKey(b.closest('[data-checkin]').dataset.checkin);
+    const box = b.closest('[data-checkin]');
+    const s = box.dataset.checkin ? byKey(box.dataset.checkin) : null;
+    const day = s ? s.day : Number(box.dataset.ciday);
     entry.checkins = entry.checkins || {};
-    const c = { ...(entry.checkins[s.day] || {}) };
-    if (field === 'reset') { delete entry.checkins[s.day]; commit(); rerender(); return; }
-    if (field === 'choice' && val === 'rest') { delete entry.checkins[s.day]; commit(); missSession(s.key); return; }
-    c[field] = field === 'choice' ? val : Number(val);
-    entry.checkins[s.day] = c;
+    const c = { ...(entry.checkins[day] || {}) };
+    if (field === 'reset') { delete entry.checkins[day]; commit(); rerender(); return; }
+    if (field === 'choice' && val === 'rest' && s) { delete entry.checkins[day]; commit(); missSession(s.key); return; }
+    // Tapping the chosen answer again clears it (handy for the optional ones).
+    if (field !== 'choice' && c[field] === Number(val)) delete c[field];
+    else c[field] = field === 'choice' ? val : Number(val);
+    entry.checkins[day] = c;
     commit(); rerender();
   }));
 
@@ -4432,7 +4637,7 @@ function wireSessionActions(rerender, opts = {}) {
     if (kind) toast(bestText(kind, ex.name, normSet(log[move][i], track), units()));
     if (!completeIfFinished(sk)) {
       startRest(restSeconds(state.profile.goal, move, ex.name), nextSetLabel(sess, shown, key));
-      if (isHold(track)) rerender();
+      if (isHold(track) || doneSets(log[move]).length >= ex.sets) rerender();
     }
   }));
 
@@ -4490,6 +4695,7 @@ function wireSessionActions(rerender, opts = {}) {
   }));
 
   wireHoldTimers(rerender);
+  wireEffort(rerender, key);
 
   app.querySelectorAll('details.menu').forEach((m) => m.addEventListener('toggle', () => {
     if (m.open) app.querySelectorAll('details.menu[open]').forEach((o) => { if (o !== m) o.open = false; });
@@ -4609,6 +4815,7 @@ function renderHome() {
       <p class="hero-when">${sessions.length ? 'No gym session today' : 'Nothing planned yet'}</p>
       <h2>${sessions.length ? 'Rest day' : 'Let’s plan your week'}</h2>
       <p class="muted">${nextS ? `Next up: <b>${esc(nextS.name)}</b>, ${DAYS[nextS.day]} ${fmtTime(nextS.start)}.` : sessions.length ? 'Every session this week is done or past. Next week’s plan appears on Monday.' : 'Add school, sport and anything else in My week, and Slotted fits your sessions around them.'}</p>
+      ${sessions.length ? checkinBlock(null) : ''}
       <div class="hero-actions">
         ${nextS ? `<a class="btn primary" href="${workoutHref(nextS)}">${icon('play')}Preview ${esc(nextS.name)}</a>` : ''}
         <a class="btn" href="${sessions.length ? '#plan' : '#week'}">${sessions.length ? 'Open this week' : 'Organise my week'}</a>
@@ -4828,7 +5035,7 @@ function renderSummary(ctx, s) {
     ${prs.length ? `<section class="card" style="margin-top:14px"><div class="card-head"><h2>New personal bests</h2></div>
       <ul class="pr-list">${prs.map((p) => `<li><b>${esc(p.name)}</b><span><span class="num">${esc(p.text)}</span> <span class="small" style="color:var(--lime-text)">${{ kg: 'Heaviest yet', reps: 'Most reps yet', sec: 'Longest yet', m: 'Furthest yet' }[p.kind]}</span></span></li>`).join('')}</ul></section>` : ''}
     ${w.exercises.length ? `<section class="card" style="margin-top:14px"><div class="card-head"><h2>What you did</h2></div>
-      <div class="hist-body" style="padding:0"><table><tbody>${w.exercises.map((x) => `<tr><td>${esc(x.name)}</td><td>${esc(setsText(x.sets, x.track, units()))}</td></tr>`).join('')}</tbody></table></div></section>`
+      <div class="hist-body" style="padding:0"><table><tbody>${w.exercises.map((x) => `<tr><td>${esc(x.name)}${effortHtml(s.key, x.move, ((state.log[ctx.key] || {})[s.key] || {})[x.move], x.name)}</td><td>${esc(setsText(x.sets, x.track, units()))}</td></tr>`).join('')}</tbody></table></div></section>`
       : `<p class="muted" style="margin-top:14px">Marked done without logging sets, so it counts toward your week but not your lift history.</p>`}
     <div class="actions" style="margin-top:20px">
       <a class="btn primary big" href="#home">Back to home</a>
@@ -4836,6 +5043,7 @@ function renderSummary(ctx, s) {
       ${nextS ? `<span class="muted small">Next up: ${esc(nextS.name)}, ${DAYS[nextS.day]} ${fmtTime(nextS.start)}</span>` : ''}
     </div>
   </div>`;
+  wireEffort(renderWorkout, ctx.key);
 }
 
 // ---------- rest timer ----------
@@ -4996,20 +5204,58 @@ function bodySvg(side, lv, labels, sel, nodata) {
   return `<figure class="body"><svg viewBox="-20 -20 1040 2240" role="img" class="${sel ? 'has-sel' : ''}" aria-label="${side} of the body, muscles shaded by how recently they were worked">${polys}</svg><figcaption>${side}</figcaption></figure>`;
 }
 
+let selectedPart = null;
+const ROLE_WORD = { primary: 'main', secondary: 'helper', stabiliser: 'stabiliser' };
+
+// A group's detail: its own summary and each detailed muscle in it, any of which can be opened.
 function muscleDetail(fr, id) {
   const m = fr.muscles.find((x) => x.id === id);
   if (!m) return '';
+  const parts = (fr.detail || []).filter((p) => p.group === id).sort((a, b) => a.fresh - b.fresh || a.label.localeCompare(b.label));
   const work = muscleWork(trainingData(), id, today(), 7, exerciseInfo());
   const h = fr.hasData ? hoursUntilFresh((d) => freshnessNow({ at: d }).muscles.find((x) => x.id === id).fresh, today()) : null;
+  const open = parts.some((p) => p.id === selectedPart) ? selectedPart : null;
   return `<div class="mdetail" aria-live="polite">
     <div class="mdetail-head">
       <div><h3>${m.label}</h3><p class="small muted">${LEVEL_LABELS[freshnessLevel(m.fresh)]}. ${sinceText(m.lastWorked)}.</p></div>
       <span class="num">${m.fresh}%</span>
     </div>
     <p class="small"><b>Likely recovered:</b> ${etaText(h)}</p>
-    ${work.length ? `<div><span class="label">Logged in the last 7 days</span><ul style="margin-top:6px">${work.map((w) => `<li><span>${esc(w.name)}${w.main ? '' : ' <span class="faint">(helper)</span>'}</span><span>${plural(w.sets, 'set')}, ${w.date.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' })}</span></li>`).join('')}</ul></div>`
-      : `<p class="small muted">No logged sets hit your ${m.label.toLowerCase()} in the last 7 days${fr.activities ? '. Strava activities may still count toward this' : ''}.</p>`}
+    ${parts.length > 1 ? `<div><span class="label">Each muscle${m.fresh < 100 ? ', most tired first' : ''}</span>
+      <div class="parts">${parts.map((p) => `<button type="button" class="part" data-part="${p.id}" aria-expanded="${open === p.id}">
+        <i class="sw l${freshnessLevel(p.fresh)}" aria-hidden="true"></i><span>${esc(p.label)}</span><b>${p.fresh}%</b></button>
+        ${open === p.id ? partDetail(fr, p) : ''}`).join('')}</div></div>`
+      : parts.length === 1 ? partDetail(fr, parts[0], true) : ''}
+    ${parts.length > 1 ? (work.length ? `<div><span class="label">Logged in the last 7 days</span><ul style="margin-top:6px">${work.map((w) => `<li><span>${esc(w.name)}${w.main ? '' : ' <span class="faint">(helper)</span>'}</span><span>${plural(w.sets, 'set')}, ${w.date.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' })}</span></li>`).join('')}</ul></div>`
+      : `<p class="small muted">No logged sets hit your ${m.label.toLowerCase()} in the last 7 days${fr.activities ? '. Strava activities may still count toward this' : ''}.</p>`) : ''}
     <div class="ask-row">${askBtn(`My ${m.label.toLowerCase()} are ${m.fresh}% recovered. Should I change my next session?`, `Ask the coach about my ${m.label.toLowerCase()}`)}</div>
+  </div>`;
+}
+
+// One detailed muscle: freshness, when it should be recovered, what worked it, recent volume and the trend.
+function partDetail(fr, p, inline = false) {
+  const data = trainingData();
+  const now = today();
+  const info = exerciseInfo();
+  const work = partWork(data, p.id, now, 14, info);
+  const thisWeek = partVolume(data, p.id, now.getTime() - 7 * 864e5, now.getTime(), info);
+  const lastWeek = partVolume(data, p.id, now.getTime() - 14 * 864e5, now.getTime() - 7 * 864e5 - 1, info);
+  const h = p.fresh >= 85 ? 0 : hoursUntilFresh((d) => freshnessNow({ at: d }).detail.find((x) => x.id === p.id).fresh, now);
+  // Freshness at the end of each of the last 7 days (today: now).
+  const trend = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(now);
+    if (i < 6) { d.setDate(d.getDate() - (6 - i)); d.setHours(23, 59, 0, 0); }
+    return { d, fresh: freshnessNow({ at: d }).detail.find((x) => x.id === p.id).fresh };
+  });
+  return `<div class="partdetail${inline ? ' inline' : ''}">
+    ${inline ? '' : `<p class="small"><b>${p.fresh}% recovered.</b> ${LEVEL_LABELS[freshnessLevel(p.fresh)]}. ${sinceText(p.lastWorked)}.</p>`}
+    ${p.fresh < 85 ? `<p class="small"><b>Likely recovered:</b> ${etaText(h)}</p>` : ''}
+    <div class="trend" role="img" aria-label="${esc(p.label)} freshness over the last 7 days: ${trend.map((t) => `${DAYS_SHORT[(t.d.getDay() + 6) % 7]} ${t.fresh}%`).join(', ')}">
+      ${trend.map((t, i) => `<span class="tcol"><span class="tbar"><i class="l${freshnessLevel(t.fresh)}" style="--h:${Math.max(4, t.fresh)}%"></i></span><small>${i === 6 ? 'Now' : DAYS_SHORT[(t.d.getDay() + 6) % 7].slice(0, 2)}</small></span>`).join('')}
+    </div>
+    <p class="small muted">Recent volume: <b>${plural(thisWeek, 'set')}</b> in the last 7 days, ${lastWeek} the week before. Helper sets count half.</p>
+    ${work.length ? `<ul class="partwork">${work.slice(0, 6).map((w) => `<li><span>${esc(w.name)} <span class="faint">(${ROLE_WORD[w.role] || 'helper'})</span></span><span>${plural(w.sets, 'set')}, ${w.date.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' })}</span></li>`).join('')}</ul>`
+      : '<p class="small muted">Nothing logged for this muscle in the last 2 weeks.</p>'}
   </div>`;
 }
 
@@ -5047,6 +5293,11 @@ function wireRecovery(rerender, openFull = false) {
     const id = el.dataset.muscle;
     if (openFull) { selectedMuscle = id; location.hash = '#progress/recovery'; return; }
     selectedMuscle = selectedMuscle === id ? null : id;
+    selectedPart = null;
+    rerender();
+  }));
+  app.querySelectorAll('[data-part]').forEach((el) => el.addEventListener('click', () => {
+    selectedPart = selectedPart === el.dataset.part ? null : el.dataset.part;
     rerender();
   }));
 }
@@ -5753,7 +6004,7 @@ function renderExerciseForm(editing) {
       <p class="hint" style="margin:0 0 10px">Main muscles do most of the work. Helpers assist, stabilisers hold you steady. These drive the recovery map, so check them.</p>
       <div class="mgrid">
         ${byGroup.map(([g, ms]) => `<div class="mgroup"><b>${esc(MUSCLE_GROUPS[g])}</b>${ms.map(([id, m]) => `
-          <label class="mrow"><span>${esc(m.label)}</span><select data-muscle="${id}" aria-label="${esc(m.label)}">${opt('', '—', roleOfId(id))}${opt('primary', 'Main', roleOfId(id))}${opt('secondary', 'Helper', roleOfId(id))}${opt('stabilisers', 'Stabiliser', roleOfId(id))}</select></label>`).join('')}</div>`).join('')}
+          <label class="xf-mrow"><span>${esc(m.label)}</span><select data-muscle="${id}" aria-label="${esc(m.label)}">${opt('', '—', roleOfId(id))}${opt('primary', 'Main', roleOfId(id))}${opt('secondary', 'Helper', roleOfId(id))}${opt('stabilisers', 'Stabiliser', roleOfId(id))}</select></label>`).join('')}</div>`).join('')}
       </div>
     </fieldset>
     <div class="field"><label class="label" for="xf-cue">How to do it (optional)</label><textarea id="xf-cue" rows="2" maxlength="300">${esc(base.cue || '')}</textarea></div>
@@ -5857,14 +6108,18 @@ function coachContext() {
   if (skipped.length) lines.push(`Days they said they can't train this week: ${skipped.join(', ')}.`);
   const c = entry.checkins && entry.checkins[tIdx];
   const r = readiness(c);
-  if (r) lines.push(`Today's check-in: sleep ${QUESTIONS[0].options[c.sleep]}, soreness ${QUESTIONS[1].options[c.sore]}, energy ${QUESTIONS[2].options[c.energy]}. Result: ${r.title}.`);
+  if (r) lines.push(`Today's check-in: sleep ${QUESTIONS[0].options[c.sleep]}, soreness ${QUESTIONS[1].options[c.sore]}, energy ${QUESTIONS[2].options[c.energy]}${extrasText(c) ? `, ${extrasText(c)}` : ''}. Result: ${r.title}.`);
+  const yc = entry.checkins && tIdx > 0 && entry.checkins[tIdx - 1];
+  if (!r && readiness(yc)) lines.push(`Yesterday's check-in result: ${readiness(yc).title}${readiness(yc).reasons.length ? ` (${readiness(yc).reasons.join(', ')})` : ''}.`);
   const streak = streakInfo(state.history, key, targetFor, templateSport);
   const cons = consistency(data, key, 8, { targetFor, sportCreditFor: templateSport });
   lines.push(`Weekly streak: ${streak.current} weeks (longest ${streak.longest}).${cons.weeksJudged ? ` Weekly target hit in ${cons.weeksMet} of the last ${cons.weeksJudged} finished weeks.` : ''}`);
   const fr = freshnessNow({ withStrava: false });
   if (fr.hasData) {
     const worked = fr.muscles.filter((m) => m.fresh < 85).sort((a, b) => a.fresh - b.fresh);
-    lines.push(`Muscle freshness, estimated from logged gym sets in the last 7 days: ${worked.length ? `${worked.map((m) => `${m.label} ${m.fresh}% recovered`).join(', ')}; everything else fresh` : 'all muscles fresh'}.`);
+    // Groups with their individual muscles, so quads and hamstrings (for example) are told apart.
+    const partsOf = (g) => fr.detail.filter((p) => p.group === g.id && p.fresh < 85).sort((a, b) => a.fresh - b.fresh).map((p) => `${p.label} ${p.fresh}%`);
+    lines.push(`Muscle freshness, an estimate from logged gym sets in the last 7 days (weight, reps, effort taps and recent volume), not a medical measurement: ${worked.length ? `${worked.map((m) => `${m.label} ${m.fresh}% recovered${partsOf(m).length > 1 ? ` (${partsOf(m).join(', ')})` : ''}`).join('; ')}; everything else fresh` : 'all muscles fresh'}.`);
   }
   const prs = recentPRs(data, nameOfMove, 5);
   if (prs.length) lines.push(`Recent personal bests: ${prs.map((x) => `${x.name} ${prText(x)} (${fmtDate(x.date)})`).join('; ')}.`);
@@ -5876,7 +6131,8 @@ function coachContext() {
       const lex = exerciseForMove(m);
       const track = all[m][0].track;
       const how = [TRACKS[track].label.toLowerCase(), hasWeight(track) && lex && lex.load !== 'none' ? `weight is ${LOADS[lex.load].toLowerCase()}` : ''].filter(Boolean).join(', ');
-      const recent = all[m].slice(-4).map((s2) => `${fmtDate(s2.date)}: ${setsText(s2.sets, track, units())}`).join('; ');
+      const effortOf = (s2) => { const e = ((((state.log || {})[s2.wk] || {})[s2.sk] || {})[m] || []).find((x) => x && x.done && EFFORT[x.effort]); return e ? ` (${EFFORT[e.effort].label.toLowerCase()})` : ''; };
+      const recent = all[m].slice(-4).map((s2) => `${fmtDate(s2.date)}: ${setsText(s2.sets, track, units())}${effortOf(s2)}`).join('; ');
       lines.push(`- ${nameOfMove(m)} (${how}): ${recent}`);
     }
   } else {

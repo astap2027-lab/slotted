@@ -25,7 +25,7 @@ A gym planner for students who play sport. It fits gym sessions around school, s
 - `js/app.js`: every screen (Home, This week, My week, Routine, Workout mode, Progress, Coach, Settings, setup), routing, logging and sync.
 - `js/scheduler.js`: week planning (free time, session placement, spacing, sport-day rules, time-of-day preference), splits, A/B weeks, streaks, suggested exercises (`MOVES`), custom routines.
 - `js/exercises.js`: **the exercise library** (about 200 exercises), detailed muscles (`MUSCLE_INFO`, grouped by `MUSCLE_GROUPS`), tracking types, load types, search, alternatives, custom exercises and validation.
-- `js/freshness.js`: muscle recovery estimate (unchanged model; it now takes muscle maps from the library).
+- `js/freshness.js`: muscle recovery estimate per detailed muscle (built on the original model), effort and intensity scaling.
 - `js/progress.js`: per-exercise history and personal bests, type-aware (weight, reps, time, distance).
 - `js/stats.js`: Home and Progress numbers (consistency, volume, records, finished workouts).
 - `js/units.js`: kg/lb conversion, bar and plates. `js/tracking.js`: how each tracking type is logged, suggested, compared and written out.
@@ -53,8 +53,13 @@ The full brief is in `docs/upgrade-brief.md`. Axel chose:
 - Progress, records, recap, summary and coach context are type-aware and use the chosen unit. Assisted exercises are judged on reps.
 - Known leftover: the same exercise logged under two stored keys (for example `core` and `x_plank`) shows twice on Progress; the Library page merges them.
 
-### Stage 2: detailed muscles and fatigue
-Track the detailed muscles separately (quads and hamstrings must recover independently). Use weight, reps, effort tap and recent volume in the fatigue estimate, built on the existing model in `freshness.js`. Extend the optional daily check-in (energy, tiredness, sleep hours and quality, soreness, stress, readiness) without making it a chore. Add the map's tap-to-expand detail, recent volume and trends.
+### Stage 2: detailed muscles and fatigue (done, branch `claude/stage-2-fatigue`)
+- `freshness.js` tracks every detailed muscle in `MUSCLE_INFO` separately (`detail` in the result; `PARTS`, `partsFor`). Each body-map group shows its most tired muscle, so old group numbers are unchanged for the same training. Forearms, hips and shins are listed too (not drawn on the outline).
+- Set load (`setLoad`): effort tap (Easy 0.7, Hard 1, To failure 1.2; no tap = Hard), weight against your best estimated 1-rep max on that move (0.6 to 1.05), time (sec/40) and distance (m/40). A week well past a muscle's usual full load slows its recovery by up to 30%. Work on a later day than "now" never counts.
+- Effort is stored on each done set as `effort: 'easy' | 'hard' | 'fail'`. The tap appears on the workout card once an exercise's sets are ticked, and in the summary.
+- Check-in (`readiness.js`): the three main answers are unchanged. `EXTRAS` (hours slept, tiredness, stress, feel ready) are optional, each worst answer adds half a point, and `reasons` lists what pulled it down. Home shows the check-in on rest days too (stored by day, as before).
+- Progress recovery: tap a group to see each muscle; tap a muscle for freshness, likely recovery time, a 7-day trend, recent volume (this week and last) and the exercises that worked it (`partWork`, `partVolume` in `stats.js`).
+- Coach context lists tired detailed muscles, effort taps and the optional check-in answers.
 
 ### Stage 3: smart timetable and fatigue-aware changes
 Natural-language availability ("I finish school at 1:05 pm on Tuesdays", "I can't train this Saturday") through the coach: the AI turns it into a structured change, app logic validates it, and the user sees a preview and approves. Add one-off exceptions, fortnightly or rotating schedules, travel and preparation time, fixed versus flexible commitments, and locking individual workouts. Fatigue-aware proposals (move, swap, lighten or rest), each with the reason, what moves, and accept or reject. Fixed commitments are never moved.

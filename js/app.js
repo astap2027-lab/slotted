@@ -4,11 +4,11 @@ import {
   exerciseLibrary, setCustomRoutine, rememberExerciseNames, customExerciseNames, routineKeys, exerciseKey,
 } from './scheduler.js';
 import { collectHistory, summarise } from './progress.js';
-import { QUESTIONS, readiness, adjustment, applyAdjustment } from './readiness.js';
+import { QUESTIONS, EXTRAS, readiness, adjustment, applyAdjustment, extrasText } from './readiness.js';
 import { askCoach, formatReply, STARTERS } from './coach.js';
 import { load, save, exportJSON, importJSON, reset, defaultState } from './store.js';
 import { mergeStates, forUpload } from './sync.js';
-import { computeFreshness, freshnessLevel, LEVEL_LABELS, musclesFor, MUSCLES } from './freshness.js';
+import { computeFreshness, freshnessLevel, LEVEL_LABELS, musclesFor, MUSCLES, PARTS, EFFORT, MAP_GROUPS } from './freshness.js';
 import { FRONT, BACK } from './anatomy.js';
 import { restSeconds, platesPerSide, warmupSets, usesBarbell, alternatives, weekRecap, PLATES } from './workout.js';
 import {
@@ -23,7 +23,7 @@ import {
 } from './tracking.js';
 import {
   weekStats, consistency, missedSessions, sessionsSince, completedWorkouts, personalRecords, recentPRs,
-  muscleSets, muscleWork, hoursUntilFresh,
+  muscleSets, muscleWork, hoursUntilFresh, partWork, partVolume,
 } from './stats.js';
 
 let state = load();
@@ -884,8 +884,28 @@ function exerciseCards(s, key, short) {
           </div>`;
         }).join('')}
       </div>
+      ${nDone >= x.sets ? effortHtml(s.key, x.move, sets, x.name) : ''}
     </li>`;
   }).join('');
+}
+
+// ---------- effort ----------
+// One optional tap per exercise once its sets are done. No tap means a normal hard set.
+function effortHtml(sk, move, sets, name) {
+  const cur = (doneSets(sets)[0] || {}).effort || '';
+  return `<div class="effort" role="group" aria-label="How hard was ${esc(name)}?">
+    <span class="small muted">How hard was it? <span class="faint">Optional</span></span>
+    <div class="effort-opts">${Object.entries(EFFORT).map(([k, v]) => `<button type="button" data-effort="${esc(sk)}|${esc(move)}|${k}" aria-pressed="${cur === k}">${v.label}</button>`).join('')}</div>
+  </div>`;
+}
+function wireEffort(rerender, wk) {
+  app.querySelectorAll('[data-effort]').forEach((b) => b.addEventListener('click', () => {
+    const [sk, move, level] = b.dataset.effort.split('|');
+    const list = logFor(wk, sk)[move] || [];
+    const same = doneSets(list).every((x) => x.effort === level);
+    for (const x of list) if (x && x.done) { if (same) delete x.effort; else x.effort = level; }
+    commit(); rerender();
+  }));
 }
 
 // ---------- hold timer ----------
@@ -1009,25 +1029,34 @@ function sessionComplete(s, key, short) {
   return shownExercises(s, short).every((x) => doneSets(log[x.move]).length >= x.sets);
 }
 
-function checkinBlock(s) {
-  const c = checkinFor(s) || {};
+// The daily check-in. Three quick answers; four more are optional and tucked away.
+// Works for a session (s) or, on a rest day, for just the day.
+function checkinBlock(s, day = s ? s.day : todayIndex()) {
+  const e = state.history[currentWeek()];
+  const c = (e && e.checkins && e.checkins[day]) || {};
   const r = readiness(c);
-  if (!r) {
-    return `<div class="checkin" data-checkin="${s.key}">
-      <p class="ci-title">How are you feeling today?</p>
-      ${QUESTIONS.map((q) => `<div class="ci-row" role="group" aria-label="${q.label}">
+  const extrasDone = EXTRAS.filter((q) => Number.isInteger(c[q.id])).length;
+  const row = (q) => `<div class="ci-row" role="group" aria-label="${q.label}">
         <span class="ci-label">${q.label}</span>
-        <div class="ci-opts">${q.options.map((o, i) => `<button type="button" data-ci="${q.id}|${i}" aria-pressed="${c[q.id] === i}">${esc(o)}</button>`).join('')}</div>
-      </div>`).join('')}
+        <div class="ci-opts${q.options.length > 3 ? ' four' : ''}">${q.options.map((o, i) => `<button type="button" data-ci="${q.id}|${i}" aria-pressed="${c[q.id] === i}">${esc(o)}</button>`).join('')}</div>
+      </div>`;
+  const more = `<details class="ci-more"${extrasDone ? ' open' : ''}><summary>More detail (optional)${extrasDone ? `, ${extrasDone} of ${EXTRAS.length} answered` : ''}</summary>${EXTRAS.map(row).join('')}</details>`;
+  const attrs = `data-checkin="${s ? s.key : ''}" data-ciday="${day}"`;
+  if (!r) {
+    return `<div class="checkin" ${attrs}>
+      <p class="ci-title">How are you feeling today?</p>
+      ${QUESTIONS.map(row).join('')}
+      ${more}
     </div>`;
   }
-  return `<div class="checkin result ${r.level}" data-checkin="${s.key}">
+  return `<div class="checkin result ${r.level}" ${attrs}>
     <p class="ci-title">${esc(r.title)}</p>
-    <p class="small">${esc(r.text)}</p>
+    <p class="small">${esc(s ? r.text : { good: 'Enjoy the rest day.', easy: 'A quiet day helps. Slotted keeps this in mind for your next session.', rough: 'Rest up. If you’re still feeling this way tomorrow, your next session can be lighter.' }[r.level])}</p>
+    ${more}
     <div class="ci-actions">
-      ${r.level === 'rough' && !c.choice ? `<button type="button" class="primary" data-ci="choice|light">Light session</button><button type="button" data-ci="choice|rest">Rest today</button>` : ''}
+      ${s && r.level === 'rough' && !c.choice ? `<button type="button" class="primary" data-ci="choice|light">Light session</button><button type="button" data-ci="choice|rest">Rest today</button>` : ''}
       <button type="button" class="ghost" data-ci="reset|0">Change answers</button>
-      ${askBtn(`My check-in today says ${r.title.toLowerCase()}. Should I adjust today's session?`, 'Ask the coach')}
+      ${askBtn(s ? `My check-in today says ${r.title.toLowerCase()}. Should I adjust today's session?` : `My check-in today says ${r.title.toLowerCase()}. How should I plan my next session?`, 'Ask the coach')}
     </div>
   </div>`;
 }
@@ -1305,13 +1334,17 @@ function wireSessionActions(rerender, opts = {}) {
 
   app.querySelectorAll('[data-ci]').forEach((b) => b.addEventListener('click', () => {
     const [field, val] = b.dataset.ci.split('|');
-    const s = byKey(b.closest('[data-checkin]').dataset.checkin);
+    const box = b.closest('[data-checkin]');
+    const s = box.dataset.checkin ? byKey(box.dataset.checkin) : null;
+    const day = s ? s.day : Number(box.dataset.ciday);
     entry.checkins = entry.checkins || {};
-    const c = { ...(entry.checkins[s.day] || {}) };
-    if (field === 'reset') { delete entry.checkins[s.day]; commit(); rerender(); return; }
-    if (field === 'choice' && val === 'rest') { delete entry.checkins[s.day]; commit(); missSession(s.key); return; }
-    c[field] = field === 'choice' ? val : Number(val);
-    entry.checkins[s.day] = c;
+    const c = { ...(entry.checkins[day] || {}) };
+    if (field === 'reset') { delete entry.checkins[day]; commit(); rerender(); return; }
+    if (field === 'choice' && val === 'rest' && s) { delete entry.checkins[day]; commit(); missSession(s.key); return; }
+    // Tapping the chosen answer again clears it (handy for the optional ones).
+    if (field !== 'choice' && c[field] === Number(val)) delete c[field];
+    else c[field] = field === 'choice' ? val : Number(val);
+    entry.checkins[day] = c;
     commit(); rerender();
   }));
 
@@ -1401,7 +1434,7 @@ function wireSessionActions(rerender, opts = {}) {
     if (kind) toast(bestText(kind, ex.name, normSet(log[move][i], track), units()));
     if (!completeIfFinished(sk)) {
       startRest(restSeconds(state.profile.goal, move, ex.name), nextSetLabel(sess, shown, key));
-      if (isHold(track)) rerender();
+      if (isHold(track) || doneSets(log[move]).length >= ex.sets) rerender();
     }
   }));
 
@@ -1459,6 +1492,7 @@ function wireSessionActions(rerender, opts = {}) {
   }));
 
   wireHoldTimers(rerender);
+  wireEffort(rerender, key);
 
   app.querySelectorAll('details.menu').forEach((m) => m.addEventListener('toggle', () => {
     if (m.open) app.querySelectorAll('details.menu[open]').forEach((o) => { if (o !== m) o.open = false; });
@@ -1578,6 +1612,7 @@ function renderHome() {
       <p class="hero-when">${sessions.length ? 'No gym session today' : 'Nothing planned yet'}</p>
       <h2>${sessions.length ? 'Rest day' : 'Let’s plan your week'}</h2>
       <p class="muted">${nextS ? `Next up: <b>${esc(nextS.name)}</b>, ${DAYS[nextS.day]} ${fmtTime(nextS.start)}.` : sessions.length ? 'Every session this week is done or past. Next week’s plan appears on Monday.' : 'Add school, sport and anything else in My week, and Slotted fits your sessions around them.'}</p>
+      ${sessions.length ? checkinBlock(null) : ''}
       <div class="hero-actions">
         ${nextS ? `<a class="btn primary" href="${workoutHref(nextS)}">${icon('play')}Preview ${esc(nextS.name)}</a>` : ''}
         <a class="btn" href="${sessions.length ? '#plan' : '#week'}">${sessions.length ? 'Open this week' : 'Organise my week'}</a>
@@ -1797,7 +1832,7 @@ function renderSummary(ctx, s) {
     ${prs.length ? `<section class="card" style="margin-top:14px"><div class="card-head"><h2>New personal bests</h2></div>
       <ul class="pr-list">${prs.map((p) => `<li><b>${esc(p.name)}</b><span><span class="num">${esc(p.text)}</span> <span class="small" style="color:var(--lime-text)">${{ kg: 'Heaviest yet', reps: 'Most reps yet', sec: 'Longest yet', m: 'Furthest yet' }[p.kind]}</span></span></li>`).join('')}</ul></section>` : ''}
     ${w.exercises.length ? `<section class="card" style="margin-top:14px"><div class="card-head"><h2>What you did</h2></div>
-      <div class="hist-body" style="padding:0"><table><tbody>${w.exercises.map((x) => `<tr><td>${esc(x.name)}</td><td>${esc(setsText(x.sets, x.track, units()))}</td></tr>`).join('')}</tbody></table></div></section>`
+      <div class="hist-body" style="padding:0"><table><tbody>${w.exercises.map((x) => `<tr><td>${esc(x.name)}${effortHtml(s.key, x.move, ((state.log[ctx.key] || {})[s.key] || {})[x.move], x.name)}</td><td>${esc(setsText(x.sets, x.track, units()))}</td></tr>`).join('')}</tbody></table></div></section>`
       : `<p class="muted" style="margin-top:14px">Marked done without logging sets, so it counts toward your week but not your lift history.</p>`}
     <div class="actions" style="margin-top:20px">
       <a class="btn primary big" href="#home">Back to home</a>
@@ -1805,6 +1840,7 @@ function renderSummary(ctx, s) {
       ${nextS ? `<span class="muted small">Next up: ${esc(nextS.name)}, ${DAYS[nextS.day]} ${fmtTime(nextS.start)}</span>` : ''}
     </div>
   </div>`;
+  wireEffort(renderWorkout, ctx.key);
 }
 
 // ---------- rest timer ----------
@@ -1965,20 +2001,58 @@ function bodySvg(side, lv, labels, sel, nodata) {
   return `<figure class="body"><svg viewBox="-20 -20 1040 2240" role="img" class="${sel ? 'has-sel' : ''}" aria-label="${side} of the body, muscles shaded by how recently they were worked">${polys}</svg><figcaption>${side}</figcaption></figure>`;
 }
 
+let selectedPart = null;
+const ROLE_WORD = { primary: 'main', secondary: 'helper', stabiliser: 'stabiliser' };
+
+// A group's detail: its own summary and each detailed muscle in it, any of which can be opened.
 function muscleDetail(fr, id) {
   const m = fr.muscles.find((x) => x.id === id);
   if (!m) return '';
+  const parts = (fr.detail || []).filter((p) => p.group === id).sort((a, b) => a.fresh - b.fresh || a.label.localeCompare(b.label));
   const work = muscleWork(trainingData(), id, today(), 7, exerciseInfo());
   const h = fr.hasData ? hoursUntilFresh((d) => freshnessNow({ at: d }).muscles.find((x) => x.id === id).fresh, today()) : null;
+  const open = parts.some((p) => p.id === selectedPart) ? selectedPart : null;
   return `<div class="mdetail" aria-live="polite">
     <div class="mdetail-head">
       <div><h3>${m.label}</h3><p class="small muted">${LEVEL_LABELS[freshnessLevel(m.fresh)]}. ${sinceText(m.lastWorked)}.</p></div>
       <span class="num">${m.fresh}%</span>
     </div>
     <p class="small"><b>Likely recovered:</b> ${etaText(h)}</p>
-    ${work.length ? `<div><span class="label">Logged in the last 7 days</span><ul style="margin-top:6px">${work.map((w) => `<li><span>${esc(w.name)}${w.main ? '' : ' <span class="faint">(helper)</span>'}</span><span>${plural(w.sets, 'set')}, ${w.date.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' })}</span></li>`).join('')}</ul></div>`
-      : `<p class="small muted">No logged sets hit your ${m.label.toLowerCase()} in the last 7 days${fr.activities ? '. Strava activities may still count toward this' : ''}.</p>`}
+    ${parts.length > 1 ? `<div><span class="label">Each muscle${m.fresh < 100 ? ', most tired first' : ''}</span>
+      <div class="parts">${parts.map((p) => `<button type="button" class="part" data-part="${p.id}" aria-expanded="${open === p.id}">
+        <i class="sw l${freshnessLevel(p.fresh)}" aria-hidden="true"></i><span>${esc(p.label)}</span><b>${p.fresh}%</b></button>
+        ${open === p.id ? partDetail(fr, p) : ''}`).join('')}</div></div>`
+      : parts.length === 1 ? partDetail(fr, parts[0], true) : ''}
+    ${parts.length > 1 ? (work.length ? `<div><span class="label">Logged in the last 7 days</span><ul style="margin-top:6px">${work.map((w) => `<li><span>${esc(w.name)}${w.main ? '' : ' <span class="faint">(helper)</span>'}</span><span>${plural(w.sets, 'set')}, ${w.date.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' })}</span></li>`).join('')}</ul></div>`
+      : `<p class="small muted">No logged sets hit your ${m.label.toLowerCase()} in the last 7 days${fr.activities ? '. Strava activities may still count toward this' : ''}.</p>`) : ''}
     <div class="ask-row">${askBtn(`My ${m.label.toLowerCase()} are ${m.fresh}% recovered. Should I change my next session?`, `Ask the coach about my ${m.label.toLowerCase()}`)}</div>
+  </div>`;
+}
+
+// One detailed muscle: freshness, when it should be recovered, what worked it, recent volume and the trend.
+function partDetail(fr, p, inline = false) {
+  const data = trainingData();
+  const now = today();
+  const info = exerciseInfo();
+  const work = partWork(data, p.id, now, 14, info);
+  const thisWeek = partVolume(data, p.id, now.getTime() - 7 * 864e5, now.getTime(), info);
+  const lastWeek = partVolume(data, p.id, now.getTime() - 14 * 864e5, now.getTime() - 7 * 864e5 - 1, info);
+  const h = p.fresh >= 85 ? 0 : hoursUntilFresh((d) => freshnessNow({ at: d }).detail.find((x) => x.id === p.id).fresh, now);
+  // Freshness at the end of each of the last 7 days (today: now).
+  const trend = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(now);
+    if (i < 6) { d.setDate(d.getDate() - (6 - i)); d.setHours(23, 59, 0, 0); }
+    return { d, fresh: freshnessNow({ at: d }).detail.find((x) => x.id === p.id).fresh };
+  });
+  return `<div class="partdetail${inline ? ' inline' : ''}">
+    ${inline ? '' : `<p class="small"><b>${p.fresh}% recovered.</b> ${LEVEL_LABELS[freshnessLevel(p.fresh)]}. ${sinceText(p.lastWorked)}.</p>`}
+    ${p.fresh < 85 ? `<p class="small"><b>Likely recovered:</b> ${etaText(h)}</p>` : ''}
+    <div class="trend" role="img" aria-label="${esc(p.label)} freshness over the last 7 days: ${trend.map((t) => `${DAYS_SHORT[(t.d.getDay() + 6) % 7]} ${t.fresh}%`).join(', ')}">
+      ${trend.map((t, i) => `<span class="tcol"><span class="tbar"><i class="l${freshnessLevel(t.fresh)}" style="--h:${Math.max(4, t.fresh)}%"></i></span><small>${i === 6 ? 'Now' : DAYS_SHORT[(t.d.getDay() + 6) % 7].slice(0, 2)}</small></span>`).join('')}
+    </div>
+    <p class="small muted">Recent volume: <b>${plural(thisWeek, 'set')}</b> in the last 7 days, ${lastWeek} the week before. Helper sets count half.</p>
+    ${work.length ? `<ul class="partwork">${work.slice(0, 6).map((w) => `<li><span>${esc(w.name)} <span class="faint">(${ROLE_WORD[w.role] || 'helper'})</span></span><span>${plural(w.sets, 'set')}, ${w.date.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' })}</span></li>`).join('')}</ul>`
+      : '<p class="small muted">Nothing logged for this muscle in the last 2 weeks.</p>'}
   </div>`;
 }
 
@@ -2016,6 +2090,11 @@ function wireRecovery(rerender, openFull = false) {
     const id = el.dataset.muscle;
     if (openFull) { selectedMuscle = id; location.hash = '#progress/recovery'; return; }
     selectedMuscle = selectedMuscle === id ? null : id;
+    selectedPart = null;
+    rerender();
+  }));
+  app.querySelectorAll('[data-part]').forEach((el) => el.addEventListener('click', () => {
+    selectedPart = selectedPart === el.dataset.part ? null : el.dataset.part;
     rerender();
   }));
 }
@@ -2722,7 +2801,7 @@ function renderExerciseForm(editing) {
       <p class="hint" style="margin:0 0 10px">Main muscles do most of the work. Helpers assist, stabilisers hold you steady. These drive the recovery map, so check them.</p>
       <div class="mgrid">
         ${byGroup.map(([g, ms]) => `<div class="mgroup"><b>${esc(MUSCLE_GROUPS[g])}</b>${ms.map(([id, m]) => `
-          <label class="mrow"><span>${esc(m.label)}</span><select data-muscle="${id}" aria-label="${esc(m.label)}">${opt('', '—', roleOfId(id))}${opt('primary', 'Main', roleOfId(id))}${opt('secondary', 'Helper', roleOfId(id))}${opt('stabilisers', 'Stabiliser', roleOfId(id))}</select></label>`).join('')}</div>`).join('')}
+          <label class="xf-mrow"><span>${esc(m.label)}</span><select data-muscle="${id}" aria-label="${esc(m.label)}">${opt('', '—', roleOfId(id))}${opt('primary', 'Main', roleOfId(id))}${opt('secondary', 'Helper', roleOfId(id))}${opt('stabilisers', 'Stabiliser', roleOfId(id))}</select></label>`).join('')}</div>`).join('')}
       </div>
     </fieldset>
     <div class="field"><label class="label" for="xf-cue">How to do it (optional)</label><textarea id="xf-cue" rows="2" maxlength="300">${esc(base.cue || '')}</textarea></div>
@@ -2826,14 +2905,18 @@ function coachContext() {
   if (skipped.length) lines.push(`Days they said they can't train this week: ${skipped.join(', ')}.`);
   const c = entry.checkins && entry.checkins[tIdx];
   const r = readiness(c);
-  if (r) lines.push(`Today's check-in: sleep ${QUESTIONS[0].options[c.sleep]}, soreness ${QUESTIONS[1].options[c.sore]}, energy ${QUESTIONS[2].options[c.energy]}. Result: ${r.title}.`);
+  if (r) lines.push(`Today's check-in: sleep ${QUESTIONS[0].options[c.sleep]}, soreness ${QUESTIONS[1].options[c.sore]}, energy ${QUESTIONS[2].options[c.energy]}${extrasText(c) ? `, ${extrasText(c)}` : ''}. Result: ${r.title}.`);
+  const yc = entry.checkins && tIdx > 0 && entry.checkins[tIdx - 1];
+  if (!r && readiness(yc)) lines.push(`Yesterday's check-in result: ${readiness(yc).title}${readiness(yc).reasons.length ? ` (${readiness(yc).reasons.join(', ')})` : ''}.`);
   const streak = streakInfo(state.history, key, targetFor, templateSport);
   const cons = consistency(data, key, 8, { targetFor, sportCreditFor: templateSport });
   lines.push(`Weekly streak: ${streak.current} weeks (longest ${streak.longest}).${cons.weeksJudged ? ` Weekly target hit in ${cons.weeksMet} of the last ${cons.weeksJudged} finished weeks.` : ''}`);
   const fr = freshnessNow({ withStrava: false });
   if (fr.hasData) {
     const worked = fr.muscles.filter((m) => m.fresh < 85).sort((a, b) => a.fresh - b.fresh);
-    lines.push(`Muscle freshness, estimated from logged gym sets in the last 7 days: ${worked.length ? `${worked.map((m) => `${m.label} ${m.fresh}% recovered`).join(', ')}; everything else fresh` : 'all muscles fresh'}.`);
+    // Groups with their individual muscles, so quads and hamstrings (for example) are told apart.
+    const partsOf = (g) => fr.detail.filter((p) => p.group === g.id && p.fresh < 85).sort((a, b) => a.fresh - b.fresh).map((p) => `${p.label} ${p.fresh}%`);
+    lines.push(`Muscle freshness, an estimate from logged gym sets in the last 7 days (weight, reps, effort taps and recent volume), not a medical measurement: ${worked.length ? `${worked.map((m) => `${m.label} ${m.fresh}% recovered${partsOf(m).length > 1 ? ` (${partsOf(m).join(', ')})` : ''}`).join('; ')}; everything else fresh` : 'all muscles fresh'}.`);
   }
   const prs = recentPRs(data, nameOfMove, 5);
   if (prs.length) lines.push(`Recent personal bests: ${prs.map((x) => `${x.name} ${prText(x)} (${fmtDate(x.date)})`).join('; ')}.`);
@@ -2845,7 +2928,8 @@ function coachContext() {
       const lex = exerciseForMove(m);
       const track = all[m][0].track;
       const how = [TRACKS[track].label.toLowerCase(), hasWeight(track) && lex && lex.load !== 'none' ? `weight is ${LOADS[lex.load].toLowerCase()}` : ''].filter(Boolean).join(', ');
-      const recent = all[m].slice(-4).map((s2) => `${fmtDate(s2.date)}: ${setsText(s2.sets, track, units())}`).join('; ');
+      const effortOf = (s2) => { const e = ((((state.log || {})[s2.wk] || {})[s2.sk] || {})[m] || []).find((x) => x && x.done && EFFORT[x.effort]); return e ? ` (${EFFORT[e.effort].label.toLowerCase()})` : ''; };
+      const recent = all[m].slice(-4).map((s2) => `${fmtDate(s2.date)}: ${setsText(s2.sets, track, units())}${effortOf(s2)}`).join('; ');
       lines.push(`- ${nameOfMove(m)} (${how}): ${recent}`);
     }
   } else {
