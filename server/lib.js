@@ -53,6 +53,8 @@ const SESSION_SECONDS = 60 * 60 * 24 * 60;
 const now = () => Math.floor(Date.now() / 1000);
 
 export async function createSession(env, userId) {
+  // Tidy up this person's expired sessions while we're here.
+  await env.DB.prepare('DELETE FROM sessions WHERE user_id = ? AND expires_at <= ?').bind(userId, now()).run();
   const token = randomToken();
   await env.DB.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)')
     .bind(await sha256(token), userId, now() + SESSION_SECONDS).run();

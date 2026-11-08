@@ -2,7 +2,8 @@
 import { json, redirect, randomToken, setCookie, siteOrigin } from '../../../../server/lib.js';
 
 export async function onRequestGet({ request, env }) {
-  if (!env.GOOGLE_CLIENT_ID || !env.DB) return json({ error: 'not_set_up' }, 503);
+  // All three are needed: without the secret, Google's reply can't be exchanged and sign-in would always fail.
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !env.DB) return json({ error: 'not_set_up' }, 503);
   const state = randomToken(16);
   const params = new URLSearchParams({
     client_id: env.GOOGLE_CLIENT_ID,
