@@ -55,6 +55,10 @@ export function mergeStates(local, server) {
   }
 
   out.exerciseNames = { ...(older.exerciseNames || {}), ...(newer.exerciseNames || {}) };
+  // The user's own exercises: keep every one either device has; the newer copy of each wins.
+  const mine = new Map((older.customExercises || []).map((e) => [e.id, e]));
+  for (const e of newer.customExercises || []) mine.set(e.id, e);
+  out.customExercises = [...mine.values()].map(clone);
   out.updatedAt = Math.max(local.updatedAt || 0, server.updatedAt || 0);
   return out;
 }

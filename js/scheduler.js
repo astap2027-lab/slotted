@@ -246,23 +246,40 @@ export function freeGaps(blocks, day, window) {
   return gaps;
 }
 
-// Preference for a start time: lower is better.
-function timePref(t) {
-  if (t >= 15 * 60 && t < 18 * 60) return 0;
-  if (t >= 9 * 60 && t < 12 * 60) return 1;
-  if (t >= 18 * 60 && t < 20 * 60) return 1.5;
-  if (t >= 6 * 60 && t < 8 * 60) return 2;
-  return 3;
+// Preference for a start time: lower is better. `when` is the athlete's preferred time of day.
+export const TIME_PREFS = ['afternoon', 'morning', 'evening'];
+function timePref(t, when = 'afternoon') {
+  const h = t / 60;
+  if (when === 'morning') {
+    if (h >= 7 && h < 9) return 0;
+    if (h >= 5 && h < 7) return 0.3;
+    if (h >= 9 && h < 12) return 1;
+    if (h >= 15 && h < 18) return 2.5;
+    if (h >= 18 && h < 20) return 3;
+    return 3.5;
+  }
+  if (when === 'evening') {
+    if (h >= 18 && h < 21) return 0;
+    if (h >= 15 && h < 18) return 1;
+    if (h >= 9 && h < 12) return 1.5;
+    if (h >= 6 && h < 8) return 3;
+    return 3.5;
+  }
+  if (h >= 15 && h < 18) return 0;
+  if (h >= 9 && h < 12) return 1;
+  if (h >= 18 && h < 20) return 1.5;
+  if (h >= 6 && h < 8) return 4; // early mornings only when they'd otherwise go without
+  return 4;
 }
 
-const ANCHORS = [16 * 60, 9 * 60, 17 * 60, 10 * 60, 7 * 60, 18 * 60 + 30, 6 * 60 + 30];
+const ANCHORS = [16 * 60, 9 * 60, 17 * 60, 10 * 60, 7 * 60, 18 * 60, 18 * 60 + 30, 19 * 60, 6 * 60 + 30];
 
 // Best slot for a day: full-length if possible, else a short slot (>= 30 min), else null.
-export function bestSlot(blocks, day, window, length) {
+export function bestSlot(blocks, day, window, length, when = 'afternoon') {
   const gaps = freeGaps(blocks, day, window);
   let best = null;
   const consider = (start, len, short) => {
-    const pref = timePref(start) + (short ? 10 : 0);
+    const pref = timePref(start, when) + (short ? 10 : 0);
     if (!best || pref < best.pref || (pref === best.pref && start < best.start)) {
       best = { start, end: start + len, short, pref };
     }
@@ -337,7 +354,7 @@ export function scoreAssignment(order, assignment, ctx) {
     const next = gymDay[(d + 1) % 7];
     if (next && (placed[d] || placed[(d + 1) % 7])) {
       if (shares(s, next)) score += d === 6 ? 30 : 50;
-      score += 3;
+      score += 6; // back-to-back days: fine for different muscles, but spread out when there's room
     }
   }
 
@@ -350,7 +367,7 @@ export function scoreAssignment(order, assignment, ctx) {
     for (let k = 1; k <= 7; k++) {
       const d = (startIdx + k) % 7;
       if (hard[d]) run++;
-      else { if (run > 2) score += (run - 2) * 15; run = 0; }
+      else { if (run > 2) score += (run - 2) * 25; run = 0; }
     }
   }
 
@@ -426,7 +443,7 @@ export function planWeek(profile, blocks, window, opts = {}) {
       if (earliest >= toMin(window.end)) { slots[d] = null; continue; }
       win = { start: toHHMM(Math.max(toMin(window.start), earliest)), end: window.end };
     }
-    slots[d] = bestSlot(blocks, d, win, length);
+    slots[d] = bestSlot(blocks, d, win, length, profile.timeOfDay);
   }
   const fixedDays = new Set(fixed.map((f) => f.day));
   const available = [];

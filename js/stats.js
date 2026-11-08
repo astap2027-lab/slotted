@@ -4,6 +4,7 @@
 import { addWeeks, keyToDate } from './scheduler.js';
 import { collectHistory, summarise } from './progress.js';
 import { musclesFor, MUSCLES } from './freshness.js';
+import { exerciseForMove, volumeOf, trackOf, secOf } from './exercises.js';
 
 const ticked = (list) => (list || []).filter((s) => s && s.done);
 const kgOf = (s) => Number(s.kg) || 0;
@@ -26,10 +27,12 @@ export function weekStats({ history = {}, log = {} }, key, { targetFor = () => 0
   let volume = 0;
   let weightedSets = 0;
   for (const moves of Object.values(log[key] || {})) {
-    for (const list of Object.values(moves || {})) {
+    for (const [move, list] of Object.entries(moves || {})) {
+      const ex = exerciseForMove(move);
       for (const s of ticked(list)) {
         sets++;
-        if (kgOf(s)) { weightedSets++; volume += kgOf(s) * repsOf(s); }
+        const v = volumeOf(s, ex);
+        if (v) { weightedSets++; volume += v; }
       }
     }
   }
@@ -105,10 +108,16 @@ export function completedWorkouts({ history = {}, log = {} }, nameOf = (m) => m,
       const s = (e.plan || []).find((p) => p.key === key);
       const moves = (log[wk] || {})[key] || {};
       const exercises = Object.entries(moves)
-        .map(([move, list]) => ({ move, name: nameOf(move), sets: ticked(list).map((x) => ({ kg: kgOf(x), reps: repsOf(x) })) }))
+        .map(([move, list]) => {
+          const ex = exerciseForMove(move);
+          const track = trackOf(ex);
+          const timed = track === 'duration' || track === 'weight_duration';
+          return { move, name: nameOf(move), track, volume: ticked(list).reduce((v, y) => v + volumeOf(y, ex), 0),
+            sets: ticked(list).map((x) => ({ kg: kgOf(x), reps: timed ? 0 : repsOf(x), sec: secOf(x, track), m: Number(x.m) || 0 })) };
+        })
         .filter((x) => x.sets.length);
       const sets = exercises.reduce((t, x) => t + x.sets.length, 0);
-      const volume = Math.round(exercises.reduce((t, x) => t + x.sets.reduce((v, y) => v + y.kg * y.reps, 0), 0));
+      const volume = Math.round(exercises.reduce((t, x) => t + x.volume, 0));
       const times = (e.times || {})[key];
       out.push({
         wk, key, name: (s && s.name) || sessionName(key), date: sessionDate(wk, s), exercises, sets, volume,
@@ -124,8 +133,8 @@ export function personalRecords(data, nameOf = (m) => m) {
   const all = collectHistory(data.log, data.history);
   return Object.entries(all).map(([move, list]) => {
     const sum = summarise(list);
-    const best = list.reduce((a, b) => (b.best.kg > a.best.kg || (b.best.kg === a.best.kg && b.best.reps > a.best.reps) ? b : a));
-    return { move, name: nameOf(move), best: sum.best, e1rm: sum.bestE1rm, date: best.date, sessions: list.length, weighted: sum.weighted };
+    const best = list.find((s) => s.best === sum.best) || list[list.length - 1];
+    return { move, name: nameOf(move), best: sum.best, e1rm: sum.bestE1rm, date: best.date, sessions: list.length, weighted: sum.weighted, kind: sum.kind };
   }).sort((a, b) => b.date - a.date || a.name.localeCompare(b.name));
 }
 
@@ -133,7 +142,7 @@ export function recentPRs(data, nameOf = (m) => m, limit = 5) {
   const all = collectHistory(data.log, data.history);
   const out = [];
   for (const [move, list] of Object.entries(all)) {
-    for (const s of list) if (s.pr) out.push({ move, name: nameOf(move), date: s.date, kg: s.best.kg, reps: s.best.reps });
+    for (const s of list) if (s.pr) out.push({ move, name: nameOf(move), date: s.date, kg: s.best.kg, reps: s.best.reps, sec: s.best.sec, m: s.best.m, kind: s.kind });
   }
   return out.sort((a, b) => b.date - a.date).slice(0, limit);
 }

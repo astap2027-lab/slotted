@@ -4,7 +4,7 @@ const KEY = 'slotted:v1';
 export const defaultState = () => ({
   version: 1,
   setupDone: false,
-  profile: { goal: 'muscle', level: 'beginner', equipment: 'gym', sessionsPerWeek: 3, sessionLength: 60 },
+  profile: { goal: 'muscle', level: 'beginner', equipment: 'gym', sessionsPerWeek: 3, sessionLength: 60, timeOfDay: 'afternoon' },
   window: { start: '06:00', end: '21:00' },
   useAB: false,
   abAnchor: null, // { week: 'YYYY-MM-DD', type: 'A' | 'B' }

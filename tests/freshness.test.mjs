@@ -16,7 +16,7 @@ test('a heavy leg day leaves legs worked and the upper body fresh', () => {
   const f = byId(r);
   assert.ok(f.glutes < 60 && f.quads < 75 && f.hamstrings < 85, JSON.stringify(f));
   assert.equal(f.chest, 100);
-  assert.equal(f.calves, 100, 'unticked sets do not count');
+  assert.ok(f.calves >= 85, 'unticked calf raises do not count; squats only steady the calves a little');
   assert.equal(r.sets, 7);
 });
 
@@ -37,7 +37,7 @@ test('a session marked done without logging counts its planned sets', () => {
 });
 
 test('your own exercises are matched by name, then by the muscle you picked', () => {
-  assert.deepEqual(musclesFor('x_leg-curl', 'Leg curl', 'legs'), { hamstrings: 1 });
+  assert.deepEqual(musclesFor('x_leg-curl', 'Leg curl', 'legs'), { hamstrings: 1, calves: 0.4 }, 'from the exercise library: hamstrings, with the calves helping');
   assert.equal(musclesFor('x_goblet', 'Goblet squat', 'legs').quads, 1);
   assert.equal(musclesFor('x_skull', 'Skull crusher', 'arms').triceps, 1);
   assert.equal(musclesFor('x_mystery', 'Mystery machine', 'shoulders').shoulders, 1);

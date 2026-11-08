@@ -173,3 +173,22 @@ test('skipped days are never used', () => {
   assert.ok(re.sessions.every((s) => ![0, 2, 4].includes(s.day)));
   assert.equal(re.sessions.length, 3);
 });
+
+test('a morning person gets sessions before school, an evening person after 6pm', () => {
+  const school = [0, 1, 2, 3, 4].map((d) => ({ day: d, type: 'school', start: '08:30', end: '15:15' }));
+  const win = { start: '06:00', end: '21:00' };
+  const prof = (timeOfDay) => ({ goal: 'muscle', level: 'intermediate', equipment: 'gym', sessionsPerWeek: 3, sessionLength: 60, timeOfDay });
+  for (const s of planWeek(prof('morning'), school, win).sessions) assert.ok(s.start >= 6 * 60 && s.end <= 9 * 60, `morning got ${s.start}`);
+  for (const s of planWeek(prof('evening'), school, win).sessions) assert.ok(s.start >= 18 * 60, `evening got ${s.start}`);
+  for (const s of planWeek(prof(undefined), school, win).sessions) assert.ok(s.start >= 15 * 60 && s.start < 18 * 60, `default got ${s.start}`);
+});
+
+test('sessions are spread out rather than stacked when there is room', () => {
+  const school = [0, 1, 2, 3, 4].map((d) => ({ day: d, type: 'school', start: '08:30', end: '15:15' }));
+  const p = { goal: 'muscle', level: 'intermediate', equipment: 'gym', sessionsPerWeek: 3, sessionLength: 60 };
+  const days = planWeek(p, school, { start: '06:00', end: '21:00' }).sessions.map((s) => s.day);
+  for (let i = 1; i < days.length; i++) assert.ok(days[i] - days[i - 1] >= 2, `back-to-back: ${days}`);
+  const four = planWeek({ ...p, sessionsPerWeek: 4 }, school, { start: '06:00', end: '21:00' }).sessions.map((s) => s.day);
+  const hard = new Array(7).fill(false); four.forEach((d) => { hard[d] = true; });
+  for (let d = 0; d < 7; d++) assert.ok(!(hard[d] && hard[(d + 1) % 7] && hard[(d + 2) % 7]), `three in a row: ${four}`);
+});

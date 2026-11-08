@@ -1,6 +1,7 @@
 // Muscle freshness: an estimate of how recovered each muscle is, built only from what was recorded:
 // ticked sets, sessions marked done, and Strava activities. Each hard set adds load to the muscles it
 // works; load fades over the following days. Freshness = how much of that load is gone.
+import { exerciseForMove, groupWeights } from './exercises.js';
 import { moveKeyForName } from './scheduler.js';
 
 export const MUSCLES = [
@@ -61,6 +62,9 @@ const GROUP_MUSCLES = {
 
 // Muscles worked by an exercise: by built-in movement, then by name, then by the muscle group picked.
 export function musclesFor(move, name, group) {
+  // The exercise library knows each exercise's muscles in detail; use it whenever the exercise is in it.
+  const ex = exerciseForMove(move, name);
+  if (ex) return groupWeights(ex);
   if (MOVE_MUSCLES[move]) return MOVE_MUSCLES[move];
   const known = moveKeyForName(name);
   if (known && MOVE_MUSCLES[known]) return MOVE_MUSCLES[known];

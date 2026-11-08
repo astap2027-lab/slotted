@@ -70,14 +70,14 @@ test('completed workouts newest first with their ticked sets', () => {
   assert.equal(list[0].sets, 2);
   assert.equal(list[0].minutes, 60);
   const lower = list.find((w) => w.wk === '2026-10-26' && w.key === 'lowerA');
-  assert.deepEqual(lower.exercises, [{ move: 'squat', name: 'SQUAT', sets: [{ kg: 65, reps: 8 }] }]);
+  assert.deepEqual(lower.exercises, [{ move: 'squat', name: 'SQUAT', track: 'weight_reps', volume: 520, sets: [{ kg: 65, reps: 8, sec: 0, m: 0 }] }]);
   assert.equal(list.find((w) => w.key === 'lowerB').sets, 0, 'marked done without logging');
 });
 
 test('records come from history only', () => {
   const prs = personalRecords(data);
   const squat = prs.find((p) => p.move === 'squat');
-  assert.deepEqual(squat.best, { kg: 65, reps: 8 });
+  assert.deepEqual(squat.best, { kg: 65, reps: 8, sec: 0, m: 0 });
   assert.equal(squat.sessions, 2);
   assert.equal(recentPRs(data).length, 2);
 });
@@ -87,7 +87,7 @@ test('muscle sets: main movers count fully, helpers in part', () => {
   assert.equal(m.chest, 2);
   assert.equal(m.triceps, 1);
   assert.equal(m.quads, 1);
-  assert.equal(m.back, 1);
+  assert.equal(m.back, 1.5, 'the row, plus the squat’s spinal erectors as a helper');
 });
 
 test('muscle work lists recent sessions that hit a muscle', () => {

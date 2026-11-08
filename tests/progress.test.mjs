@@ -33,7 +33,7 @@ test('personal bests are flagged after the first session', () => {
   const sum = summarise(bench);
   assert.equal(sum.prs, 2);
   assert.equal(sum.change, 4);
-  assert.deepEqual(sum.best, { kg: 24, reps: 6 });
+  assert.deepEqual(sum.best, { kg: 24, reps: 6, sec: 0, m: 0 });
 });
 
 test('bodyweight exercises track reps instead of weight', () => {
