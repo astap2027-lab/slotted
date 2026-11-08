@@ -202,6 +202,14 @@ test('signing in removes that person’s expired sessions, and keeps live ones',
   assert.equal((await (await me.onRequestGet({ request: get('/api/me', cookie), env })).json()).signedIn, true);
 });
 
+test('the sync size limit counts bytes, not characters', async () => {
+  const { cookie } = await signIn();
+  const big = { data: { note: '–'.repeat(700000) }, baseUpdatedAt: 0 }; // 700k characters, 2.1 MB
+  assert.equal((await sync.onRequestPut({ request: send('PUT', '/api/sync', cookie, big), env })).status, 413);
+  const ok = { data: { note: 'x'.repeat(1000000) }, baseUpdatedAt: 0 };
+  assert.equal((await sync.onRequestPut({ request: send('PUT', '/api/sync', cookie, ok), env })).status, 200);
+});
+
 test('a non-race Strava activity is not marked hard', () => {
   assert.equal(simplify({ id: 1, sport_type: 'Ride', start_date_local: '2026-11-04T17:00:00Z', moving_time: 3600 }).hard, false);
 });

@@ -2,7 +2,8 @@
 // A save based on an older copy than the server's is refused with the server's copy, so the app can merge.
 import { json, currentUser, sameOrigin } from '../../server/lib.js';
 
-const MAX_BYTES = 900000;
+// D1 allows up to 2 MB per row. A heavy year of logging is roughly 0.5 MB.
+const MAX_BYTES = 1800000;
 
 export async function onRequestGet({ request, env }) {
   const user = await currentUser(request, env);
@@ -16,7 +17,7 @@ export async function onRequestPut({ request, env }) {
   const user = await currentUser(request, env);
   if (!user) return json({ error: 'signed_out' }, 401);
   const text = await request.text();
-  if (text.length > MAX_BYTES) return json({ error: 'too_large' }, 413);
+  if (new TextEncoder().encode(text).length > MAX_BYTES) return json({ error: 'too_large' }, 413);
   let body;
   try { body = JSON.parse(text); } catch { return json({ error: 'bad_request' }, 400); }
   if (!body || typeof body.data !== 'object' || body.data === null) return json({ error: 'bad_request' }, 400);

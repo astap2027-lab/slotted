@@ -103,7 +103,7 @@ test('timed, distance and effort-tapped sets merge set by set', () => {
 });
 
 test('a full year of heavy training still fits the server’s size limit', () => {
-  const MAX_BYTES = 900000; // functions/api/sync.js
+  const MAX_BYTES = 1800000; // functions/api/sync.js
   const state = { ...newer, history: {}, log: {}, coach: { turns: [] } };
   const d = new Date(2025, 10, 3);
   for (let w = 0; w < 52; w++, d.setDate(d.getDate() + 7)) {
@@ -112,7 +112,6 @@ test('a full year of heavy training still fits the server’s size limit', () =>
     state.log[key] = Object.fromEntries(['a', 'b', 'c', 'd', 'e'].map((k) => [k, Object.fromEntries(Array.from({ length: 6 }, (_, j) => [`x_exercise-${j}`, Array.from({ length: 4 }, () => ({ kg: 62.5, reps: 10, done: true, effort: 'hard' }))]))]));
   }
   state.coach.turns = Array.from({ length: 40 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: 'x'.repeat(1500) }));
-  const size = JSON.stringify({ data: forUpload(state), baseUpdatedAt: 1 }).length;
-  assert.ok(size < MAX_BYTES, `${size} bytes`);
-  console.log(`  a heavy year of training is ${Math.round(size / 1000)} KB of ${MAX_BYTES / 1000} KB`);
+  const size = Buffer.byteLength(JSON.stringify({ data: forUpload(state), baseUpdatedAt: 1 }));
+  assert.ok(size < MAX_BYTES / 2, `${size} bytes: a year should use well under half`);
 });
