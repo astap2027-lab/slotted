@@ -32,7 +32,8 @@ export function collectHistory(log = {}, history = {}) {
       const date = keyToDate(wk);
       date.setDate(date.getDate() + (planned ? planned.day : 0));
       for (const [move, raw] of Object.entries(moves)) {
-        const track = trackOf(exerciseForMove(move));
+        const ex = exerciseForMove(move);
+        const track = trackOf(ex);
         const sets = (raw || []).filter((x) => x && x.done).map((x) => ({
           kg: Number(x.kg) || 0,
           reps: track === 'duration' || track === 'weight_duration' ? 0 : Number(x.reps) || 0,
@@ -40,14 +41,15 @@ export function collectHistory(log = {}, history = {}) {
           m: Number(x.m) || 0,
         }));
         if (!sets.length) continue;
-        (byMove[move] = byMove[move] || []).push({ wk, sk, date, sets, track });
+        (byMove[move] = byMove[move] || []).push({ wk, sk, date, sets, track, assisted: !!(ex && ex.load === 'assisted') });
       }
     }
   }
   for (const move of Object.keys(byMove)) {
     const list = byMove[move].sort((a, b) => a.date - b.date);
     // One kind per exercise so every session in its history is compared like with like.
-    const kind = kindOf(list[0].track, list.flatMap((s) => s.sets));
+    // Assisted work gets easier as the assistance goes down, so it's judged on reps, never on the weight.
+    const kind = list[0].assisted ? 'reps' : kindOf(list[0].track, list.flatMap((s) => s.sets));
     let bestSoFar = 0;
     for (const s of list) {
       s.kind = kind;

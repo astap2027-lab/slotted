@@ -28,6 +28,7 @@ A gym planner for students who play sport. It fits gym sessions around school, s
 - `js/freshness.js`: muscle recovery estimate (unchanged model; it now takes muscle maps from the library).
 - `js/progress.js`: per-exercise history and personal bests, type-aware (weight, reps, time, distance).
 - `js/stats.js`: Home and Progress numbers (consistency, volume, records, finished workouts).
+- `js/units.js`: kg/lb conversion, bar and plates. `js/tracking.js`: how each tracking type is logged, suggested, compared and written out.
 - `js/workout.js`: rest timer lengths, plates, warm-ups, older swap logic. `js/readiness.js`: daily check-in. `js/coach.js`: coach instructions and client. `js/sync.js`: merging two devices. `js/store.js`: saving, defaults, backup.
 - `styles.css`: the design system. `index.html`, `privacy.html`, `sw.js`, `manifest.webmanifest`.
 
@@ -43,22 +44,14 @@ The full brief is in `docs/upgrade-brief.md`. Axel chose:
 2. **Effort:** one optional tap per exercise after it's done (Easy / Hard / To failure). Skipping it means "normal hard set".
 3. **Delivery:** in stages, tested as each lands.
 
-### Stage 1: exercise library and tracking (in progress)
-Done:
-- `js/exercises.js` with the full library, detailed muscle mapping (primary 1, secondary 0.5, stabiliser 0.2, overridable per muscle), search and filters, alternatives, custom exercise validation, duplicate detection, mapping suggestions, `volumeOf`, `secOf`, `targetOf`. Tests in `tests/exercises.test.mjs`.
-- Recovery (`musclesFor`), progress history, records and volume use the library. Dumbbell pairs count twice in volume; assisted, timed and distance work have no volume.
-- `sync.js` merges `customExercises`; `sw.js` and the preview build include `exercises.js`.
-
-Still to do:
-- `app.js`: import from `exercises.js`; call `setMoveResolver(nameOfMove)` and `setCustomExercises(state.customExercises)` on start, after restoring a backup, and after a sync pull. Add `units: 'kg'` and `customExercises: []` to `defaultState` in `store.js`.
-- **Units:** a kg or lb setting. Store kg, convert for display and input. Plates and warm-ups in lb use a 45 lb bar and lb plates.
-- **Workout mode:** set rows follow the exercise's tracking type (reps; weight and reps; time; weight and time; distance and time; weight and distance). The weight label says what it means ("kg each hand", "kg added", "kg assistance", "kg total"). A large timer for timed exercises (start, pause, resume, reset; finishing fills in and ticks the next set; manual entry still works). Suggestions and "Tick all as planned" follow the tracking type. Personal best toasts match the type (heavier, more reps, longer, further).
-- **Swap:** use `alternativesFor()` (same main muscles and movement, kit the user has). Keep the existing fallback.
-- **Library page** (`#library`, under Training next to Routine): search, filters (muscle group, equipment, primary or secondary muscle, compound or isolation, type), exercise details (muscles by role, equipment, tracking, instructions, alternatives, the user's history with it). "Create exercise" form with duplicate warning and a suggested muscle mapping the user reviews. "Add to a workout" when they use their own routine.
-- **Routine editor:** the name box suggests every library and custom exercise; a known exercise fills in its muscle group automatically.
-- **Progress:** charts and bests per tracking type (`summarise()` returns `kind`: kg, reps, sec or m). Never compare different types as the same thing. Show units.
-- **Coach context:** include sets in their own units and tracking types (time, distance).
-- Then update tests, run `npm test`, check every page in a browser on desktop and phone in both themes, bump `sw.js`, and push.
+### Stage 1: exercise library and tracking (done)
+- `js/exercises.js`: the library, detailed muscle mapping (primary 1, secondary 0.5, stabiliser 0.2), search, alternatives, custom exercise validation, `volumeOf`, `secOf`, `targetOf`.
+- `js/units.js`: kg or lb. Weights are always stored in kg; `fromKg`/`toKg` convert for display and input. lb uses a 45 lb (or 35 lb) bar and lb plates.
+- `js/tracking.js`: per tracking type set fields, weight labels ("kg each hand", "kg added", "kg assistance", "kg total"), suggestions, personal-best checks (heavier, more reps, longer, further) and set text.
+- Workout mode rows follow the tracking type; timed exercises get a large hold timer (finishing fills and ticks the next set). Swap uses `alternativesFor()` with the old fallback.
+- Library page `#library` (Training tab): search, filters, details, history, create/edit/delete own exercises (`state.customExercises`, ids `u_`; deleting keeps `{ deleted: true }` so sync doesn't revive it; renaming keeps the old name in `aka`).
+- Progress, records, recap, summary and coach context are type-aware and use the chosen unit. Assisted exercises are judged on reps.
+- Known leftover: the same exercise logged under two stored keys (for example `core` and `x_plank`) shows twice on Progress; the Library page merges them.
 
 ### Stage 2: detailed muscles and fatigue
 Track the detailed muscles separately (quads and hamstrings must recover independently). Use weight, reps, effort tap and recent volume in the fatigue estimate, built on the existing model in `freshness.js`. Extend the optional daily check-in (energy, tiredness, sleep hours and quality, soreness, stress, readiness) without making it a chore. Add the map's tap-to-expand detail, recent volume and trends.

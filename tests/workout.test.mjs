@@ -57,7 +57,7 @@ test('the recap summarises last week', () => {
   assert.equal(r.done, 3);
   assert.equal(r.met, true, 'one sport session tops it up to 4');
   assert.equal(r.sets, 2);
-  assert.deepEqual(r.prs, [{ move: 'squat', name: 'Squat', kg: 65, reps: 8 }]);
+  assert.deepEqual(r.prs, [{ move: 'squat', name: 'Squat', kg: 65, reps: 8, sec: 0, m: 0 }]);
   const empty = weekRecap({ history, log, prevKey: '2026-10-12', targetFor: () => 4 });
   assert.equal(empty.hadWeek, false);
 });

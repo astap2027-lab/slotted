@@ -366,7 +366,7 @@ export function findExercise(nameOrKey) {
 
 // The user's own exercises join the library. Invalid ones are skipped, never thrown away.
 export function setCustomExercises(list) {
-  const custom = (Array.isArray(list) ? list : []).filter((e) => !validateExercise(e).length).map((e) => ({ ...e, custom: true }));
+  const custom = (Array.isArray(list) ? list : []).filter((e) => e && !e.deleted && !validateExercise(e).length).map((e) => ({ ...e, custom: true }));
   exAll = [...BUILT_IN, ...custom];
   exReindex();
 }

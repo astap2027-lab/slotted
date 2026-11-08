@@ -36,10 +36,10 @@ export function platesPerSide(total, bar = 20, plates = PLATES) {
 
 // ---------- warm-up ----------
 // Ramp up to the working weight: empty bar first, then fewer reps as the weight climbs.
-export function warmupSets(work, { bar = 20, step = 2.5, barbell = true } = {}) {
+export function warmupSets(work, { bar = 20, step = 2.5, barbell = true, heavy = 60, mid = 30 } = {}) {
   if (!(work > 0)) return [];
   const round = (x) => Math.round(x / step) * step;
-  const scheme = work >= 60 ? [[0, 10], [0.5, 5], [0.7, 3], [0.85, 1]] : work >= 30 ? [[0, 10], [0.6, 5], [0.8, 2]] : [[0.5, 10]];
+  const scheme = work >= heavy ? [[0, 10], [0.5, 5], [0.7, 3], [0.85, 1]] : work >= mid ? [[0, 10], [0.6, 5], [0.8, 2]] : [[0.5, 10]];
   const out = [];
   for (const [pct, reps] of scheme) {
     let kg = pct === 0 ? (barbell ? bar : round(work * 0.4)) : round(work * pct);
@@ -104,7 +104,7 @@ export function weekRecap({ history = {}, log = {}, prevKey, targetFor, sportCre
       if (s.pr && (!best[move] || s.best.kg > best[move].kg)) best[move] = { ...s.best };
     }
   }
-  const prs = Object.entries(best).map(([move, b]) => ({ move, name: nameOf(move), kg: b.kg, reps: b.reps }))
+  const prs = Object.entries(best).map(([move, b]) => ({ move, name: nameOf(move), kg: b.kg, reps: b.reps, sec: b.sec, m: b.m }))
     .sort((a, b) => b.kg - a.kg);
   return { hadWeek: !!prev && (done > 0 || planned > 0 || sets > 0), done, planned, target, met, prs, sets };
 }
