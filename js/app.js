@@ -8,7 +8,7 @@ import { QUESTIONS, EXTRAS, readiness, adjustment, applyAdjustment, extrasText }
 import { askCoach, formatReply, STARTERS } from './coach.js';
 import {
   weekBlocks, windowFor, dayWindows, parseAvailability, validateChange, applyChanges, describeChange, touchesFixed,
-  timetableContext, askTimetable, BLOCK_TYPES, planWithFlex, appliesTo, SPORT_EFFORTS, sportEffort, photoPlan, PHOTO_MAX_IMAGES,
+  timetableContext, askTimetable, askTimetablePhotos, BLOCK_TYPES, planWithFlex, appliesTo, SPORT_EFFORTS, sportEffort, photoPlan, PHOTO_MAX_IMAGES,
 } from './timetable.js';
 import { proposeChanges, applyProposal } from './adjust.js';
 import { load, save, exportJSON, importJSON, reset, defaultState } from './store.js';
@@ -1332,7 +1332,7 @@ function wireProposals(rerender) {
 // ---------- timetable changes in plain words ----------
 // The athlete types a change ("I finish school at 1:05 on Tuesdays"). Slotted reads it (or asks the AI),
 // checks it, shows exactly what would change, and only applies it when they say so.
-let avail = { text: '', busy: false, changes: null, bad: [], note: '', done: '', photo: false, raw: null };
+let avail = { text: '', busy: false, changes: null, bad: [], note: '', done: '', photo: false, raw: null, retry: false, progress: null };
 // Photos of a timetable waiting to be read: [{ media_type, data (base64), url (for the thumbnail) }]. Never saved.
 let availImgs = [];
 let availWeek = 'both'; // with Week A/B on and one photo: which week it shows ('A', 'B' or 'both')
@@ -1418,7 +1418,10 @@ function photoPreviewHtml(ctx) {
 
 function availPreview() {
   const ctx = weekCtx();
-  if (avail.busy) return `<p class="small muted" role="status">${avail.photo ? 'Reading your timetable. This can take up to half a minute…' : 'Working it out…'}</p>`;
+  if (avail.busy) {
+    const pr = avail.progress;
+    return `<p class="small muted" role="status">${avail.photo ? `Reading your timetable${pr && pr.total > 1 ? `: ${pr.done} of ${pr.total} photos done` : ''}. This can take up to a minute…` : 'Working it out…'}</p>`;
+  }
   if (avail.photo && avail.raw !== null && !avail.done) return photoPreviewHtml(ctx);
   if (avail.done) return `<div class="avail-done" role="status"><p class="small"><b>${esc(avail.done)}</b></p>${proposalsCard(ctx)}</div>`;
   if (!avail.changes) return avail.note ? `<p class="small" role="status">${esc(avail.note)}</p>` : '';
@@ -1426,6 +1429,7 @@ function availPreview() {
   if (!good.length) {
     return `<div class="avail-preview" role="status"><p class="small">${esc(avail.note || 'Slotted couldn’t work out a change from that.')}</p>
       ${avail.bad.length ? `<ul class="small">${avail.bad.map((b) => `<li>${esc(b)}</li>`).join('')}</ul>` : ''}
+      ${avail.retry ? '<div class="actions"><button type="button" class="primary" id="av-retry">Try again</button></div>' : ''}
       <p class="small muted">${avail.photo ? 'You can add your commitments by hand below.' : 'Try naming the day and time, like “I finish school at 2:30 on Wednesdays”, or change it below in My week.'}</p></div>`;
   }
   const next = applyChanges(state, good, ctx.key, ctx.tIdx);
@@ -1478,16 +1482,22 @@ function wireAvail(rerender) {
     const ctx = weekCtx();
     const said = text.value.trim();
     if (!said && !availImgs.length) return;
-    avail = { text: said, busy: false, changes: null, bad: [], note: '', done: '', photo: availImgs.length > 0, raw: null };
+    avail = { text: said, busy: false, changes: null, bad: [], note: '', done: '', photo: availImgs.length > 0, raw: null, retry: false, progress: null };
     availSwap = false;
     let changes;
     if (avail.photo) {
       avail.busy = true; rerender();
-      const res = await askTimetable(said, timetableContext(state, ctx.key, ctx.tIdx), { images: availImgs.map(({ media_type, data }) => ({ media_type, data })) });
+      avail.progress = { done: 0, total: availImgs.length };
+      const res = await askTimetablePhotos(said, timetableContext(state, ctx.key, ctx.tIdx), availImgs.map(({ media_type, data }) => ({ media_type, data })), {
+        onProgress: (done, total) => { avail.progress = { done, total }; const out = document.getElementById('av-out'); if (out && avail.busy) out.innerHTML = availPreview(); },
+      });
       avail.busy = false;
       if (res.error) {
         avail.changes = [];
+        avail.retry = ['timeout', 'busy', 'upstream_error', 'offline'].includes(res.error);
         avail.note = {
+          timeout: 'Reading took too long and was stopped. Nothing was changed. Try again, or add one photo at a time.',
+          busy: 'The AI is busy right now. Wait a moment and try again.',
           offline: 'You’re offline. Reading a photo needs an internet connection.',
           rate_limited: 'You’ve used today’s AI questions. Try the photo again tomorrow, or add your commitments by hand below.',
           image_rejected: 'That image couldn’t be used. Try a screenshot, or a smaller JPG or PNG.',
@@ -1535,6 +1545,8 @@ function wireAvail(rerender) {
   });
   const no = document.getElementById('av-no');
   if (no) no.addEventListener('click', () => { avail = { ...avail, changes: null, bad: [], note: '', raw: null }; rerender(); });
+  const retry = document.getElementById('av-retry');
+  if (retry) retry.addEventListener('click', () => form.requestSubmit());
   const swap = document.getElementById('av-swap');
   if (swap) swap.addEventListener('click', () => { availSwap = !availSwap; rerender(); });
   const file = document.getElementById('av-file');

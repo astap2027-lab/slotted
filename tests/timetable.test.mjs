@@ -391,3 +391,79 @@ test('the timetable endpoint reads photos with the stronger model, falls back, a
   ]) assert.equal((await onRequestPost({ request: req({ images: bad }), env })).status, 400);
   assert.equal(calls.length, 0, 'rejected photos never reach the model');
 });
+
+// ---------- Axel's real timetable shape: Study rows, WG, one photo per request ----------
+const FRI_A = rows([['Study', '08:45', '09:40'], ['Charlesworth, Harry', '09:40', '09:55'], ['Health & Movement Science', '09:55', '10:50'], ['Study', '11:20', '12:15'], ['English Advanced', '12:15', '13:05'], ['Mathematics Standard', '13:35', '14:25'], ['Legal Studies', '14:25', '15:15']]);
+const MON_A = rows([['Studies of Religion II', '08:45', '09:40'], ['Charlesworth, Harry', '09:40', '09:55'], ['Study', '09:55', '10:50'], ['Mathematics Standard', '11:20', '12:15'], ['Study', '12:15', '13:05'], ['English Advanced', '13:35', '14:25'], ['Health & Movement Science', '14:25', '15:15']]);
+
+test('a Study period is free even if the AI marks it as a class; the roll group row counts as attendance', async () => {
+  const { schoolDay } = await import('../js/timetable.js');
+  const fri = schoolDay(FRI_A.map((r) => ({ ...r, free: false }))); // the AI got "free" wrong on purpose
+  assert.equal(fri.start, '09:40', 'period 1 is Study, so Friday starts at the roll group');
+  assert.equal(fri.end, '15:15');
+  const mon = schoolDay(MON_A);
+  assert.equal(mon.start, '08:45'); assert.equal(mon.end, '15:15');
+  assert.equal(schoolDay(rows([['Maths', '08:45', '09:40'], ['Study', '09:40', '10:35'], ['Study', '10:35', '11:30']])).end, '09:40', 'Study periods at the end of the day don’t count');
+});
+
+test('photos are read one request each, in parallel, and merged back into one result in photo order', async () => {
+  const { askTimetablePhotos, photoPlan } = await import('../js/timetable.js');
+  const seen = [];
+  const dayOf = (spec) => [{ day: 'Mon', periods: spec }];
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    seen.push(body.images.length);
+    const first = body.images[0].data === 'QQ==';
+    await new Promise((r) => setTimeout(r, first ? 30 : 5)); // the second photo finishes first
+    return new Response(JSON.stringify({ photo: { photos: [{ photo: 1, week: first ? 'A' : 'B', days: dayOf(first ? MON_A : FRI_A) }], other: [{ photo: 1, day: 'Thu', label: first ? 'Gym club' : 'Band', type: 'other', intensity: 'none', start: '16:00', end: '17:00' }], unreadable: [first ? 'row 3' : 'row 9'] } }), { status: 200 });
+  };
+  const progress = [];
+  const res = await askTimetablePhotos('', 'ctx', [{ media_type: 'image/jpeg', data: 'QQ==' }, { media_type: 'image/jpeg', data: 'Qg==' }], { onProgress: (d, t) => progress.push([d, t]) });
+  assert.deepEqual(seen, [1, 1], 'one image per request');
+  assert.deepEqual(progress, [[0, 2], [1, 2], [2, 2]]);
+  assert.deepEqual(res.photo.photos.map((p) => [p.photo, p.week]), [[1, 'A'], [2, 'B']], 'photo numbers follow the order they were added');
+  assert.deepEqual(res.photo.other.map((o) => [o.photo, o.label]), [[1, 'Gym club'], [2, 'Band']]);
+  assert.deepEqual(res.photo.unreadable, ['Photo 1: row 3', 'Photo 2: row 9']);
+  const ab = { ...base(), useAB: true, abAnchor: { week: KEY, type: 'A' }, blocks: { A: [], B: [] } };
+  const plan = photoPlan(res.photo, ab);
+  assert.deepEqual(plan.groups.map((g) => [g.week, g.changes[0].start, g.changes[0].end]), [['A', '08:45', '15:15'], ['B', '09:40', '15:15']]);
+});
+
+test('a slow or failed photo never hangs the page, and the other photo still counts', async () => {
+  const { askTimetablePhotos } = await import('../js/timetable.js');
+  const ok = { photos: [{ photo: 1, week: 'none', days: [{ day: 'Mon', periods: MON_A }] }], other: [], unreadable: [] };
+  // Photo 1 never answers; the limit ends it. Photo 2 is fine.
+  globalThis.fetch = (url, init) => {
+    const first = JSON.parse(init.body).images[0].data === 'QQ==';
+    if (!first) return Promise.resolve(new Response(JSON.stringify({ photo: ok }), { status: 200 }));
+    return new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))));
+  };
+  const imgs = [{ media_type: 'image/jpeg', data: 'QQ==' }, { media_type: 'image/jpeg', data: 'Qg==' }];
+  const part = await askTimetablePhotos('', '', imgs, { timeoutMs: 40 });
+  assert.equal(part.photo.photos.length, 1); assert.equal(part.photo.photos[0].photo, 2);
+  assert.ok(part.photo.unreadable.includes('Photo 1 couldn’t be read'));
+  // Every photo times out: a clear error, not a hang.
+  globalThis.fetch = (url, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))));
+  assert.deepEqual(await askTimetablePhotos('', '', imgs, { timeoutMs: 20 }), { error: 'timeout' });
+  // The server's own timeout answer is understood.
+  globalThis.fetch = async () => new Response('{"error":"timeout"}', { status: 504 });
+  assert.deepEqual(await askTimetablePhotos('', '', imgs.slice(0, 1)), { error: 'timeout' });
+});
+
+test('the endpoint gives the stronger model a time limit, then the fallback a shorter one, and reports a timeout', async () => {
+  const { onRequestPost } = await import('../functions/api/timetable.js');
+  const env = { ANTHROPIC_API_KEY: 'k' };
+  const req = () => new Request('https://slotted.pages.dev/api/timetable', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ images: [{ media_type: 'image/jpeg', data: 'QUJD' }] }) });
+  const signals = [];
+  const bodies = [];
+  globalThis.fetch = (url, init) => {
+    signals.push(init.signal); bodies.push(JSON.parse(init.body));
+    return Promise.reject(Object.assign(new Error('The operation timed out'), { name: 'TimeoutError' }));
+  };
+  const res = await onRequestPost({ request: req(), env });
+  assert.equal(res.status, 504); assert.deepEqual(await res.json(), { error: 'timeout' });
+  assert.equal(signals.length, 2, 'the fallback gets one try');
+  assert.ok(signals.every((s) => s instanceof AbortSignal), 'both calls are time-limited');
+  assert.deepEqual(bodies[0].output_config, { effort: 'medium' });
+  assert.equal(bodies[0].max_tokens, 8000);
+});

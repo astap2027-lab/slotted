@@ -77,16 +77,21 @@ const PHOTO_TOOL = {
   strict: true,
 };
 
-async function photoCall(env, body) {
+// Each call has its own time limit so the page always gets an answer before the 100 second proxy cut-off.
+const STRONG_MS = 65000;
+const FALLBACK_MS = 25000;
+
+async function photoCall(env, body, ms) {
   let res;
   try {
     res = await fetch(API_URL, {
       method: 'POST',
       headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': API_VERSION, 'content-type': 'application/json' },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(ms),
     });
-  } catch {
-    return { failed: 'upstream_error' };
+  } catch (e) {
+    return { failed: e && (e.name === 'TimeoutError' || e.name === 'AbortError') ? 'timeout' : 'upstream_error' };
   }
   if (res.status === 429 || res.status === 529) return { failed: 'busy' };
   if (!res.ok) return { failed: 'upstream_error' };
@@ -108,15 +113,16 @@ async function readPhotos(env, images, text) {
   // Claude Sonnet 5.5: thinking stays on (it can't be disabled) and the tool can't be forced, so the
   // prompt asks for the tool call and we check that it happened.
   let out = await photoCall(env, {
-    ...base, model: env.PHOTO_MODEL || 'claude-sonnet-5-5', max_tokens: 12000,
-    tool_choice: { type: 'auto' }, output_config: { effort: 'high' },
-  });
+    ...base, model: env.PHOTO_MODEL || 'claude-sonnet-5-5', max_tokens: 8000,
+    tool_choice: { type: 'auto' }, output_config: { effort: 'medium' },
+  }, STRONG_MS);
   if (!out.input) {
     out = await photoCall(env, {
       ...base, model: env.COACH_MODEL || 'claude-haiku-5-5', max_tokens: 8000,
       thinking: { type: 'disabled' }, tool_choice: { type: 'tool', name: PHOTO_TOOL.name },
-    });
+    }, FALLBACK_MS);
   }
+  if (out.failed === 'timeout') return json({ error: 'timeout' }, 504);
   if (out.failed) return json({ error: out.failed }, 502);
   if (!out.input) {
     return json({ photo: null, note: out.stop === 'max_tokens' ? 'That timetable was too long to read in one go. Try one photo at a time.' : 'That couldn’t be read. Try a clear screenshot of your timetable.' });
