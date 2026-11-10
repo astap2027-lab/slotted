@@ -192,3 +192,48 @@ test('sessions are spread out rather than stacked when there is room', () => {
   const hard = new Array(7).fill(false); four.forEach((d) => { hard[d] = true; });
   for (let d = 0; d < 7; d++) assert.ok(!(hard[d] && hard[(d + 1) % 7] && hard[(d + 2) % 7]), `three in a row: ${four}`);
 });
+
+// ---------- morning and "mix" time preferences ----------
+const school845 = [0, 1, 2, 3, 4].map((day) => ({ day, start: '08:45', end: '15:15', type: 'school', label: 'School' }));
+const sailing = [1, 3].map((day) => ({ day, start: '16:00', end: '18:00', type: 'sport', label: 'Sailing', intensity: 'light' }));
+const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+
+test('mix: before school on sport days, after school when the afternoon is free', () => {
+  const blocks = [...school845, ...sailing];
+  for (const day of [1, 3]) {
+    const s = bestSlot(blocks, day, win, 60, 'mix');
+    assert.equal(s.short, false);
+    assert.equal(hhmm(s.start), '07:00', `day ${day} goes before school`);
+    assert.ok(s.end <= toMin('08:30'), 'finishes before the school buffer');
+  }
+  for (const day of [0, 2, 4]) {
+    const s = bestSlot(blocks, day, win, 60, 'mix');
+    assert.ok(s.start >= toMin('15:30') && s.start < toMin('18:00'), `day ${day} after school, got ${hhmm(s.start)}`);
+  }
+});
+
+test('afternoon and evening preferences are unchanged, and unknown values act as afternoon', () => {
+  const blocks = [...school845, ...sailing];
+  const after = bestSlot(blocks, 1, win, 60, 'afternoon');
+  assert.ok(after.start >= toMin('18:15'), 'afternoon taken by sailing, so the evening, not before school');
+  assert.equal(bestSlot(blocks, 1, win, 60, 'nonsense').start, after.start);
+  assert.ok(bestSlot(blocks, 1, win, 60, 'evening').start >= toMin('18:15'));
+  assert.equal(hhmm(bestSlot(blocks, 0, win, 60, 'morning').start), '07:00');
+});
+
+test('mix: with school starting very early, the evening beats a 6am start', () => {
+  const early = [0, 1, 2, 3, 4].map((day) => ({ day, start: '07:15', end: '15:15', type: 'school', label: 'School' }));
+  const s = bestSlot([...early, ...sailing], 1, win, 60, 'mix');
+  assert.ok(s.start >= toMin('18:15'), `got ${hhmm(s.start)}`);
+});
+
+test('a mixed week puts sessions before school on sailing days and never over a commitment', () => {
+  const blocks = [...school845, ...sailing];
+  const res = planWeek(profile(4, { timeOfDay: 'mix' }), blocks, win);
+  assert.equal(res.sessions.length, 4);
+  for (const s of res.sessions) {
+    const clash = blocks.find((b) => b.day === s.day && toMin(b.start) < s.end && toMin(b.end) > s.start);
+    assert.ok(!clash, `${s.name} on day ${s.day} overlaps ${clash && clash.label}`);
+    if (s.day === 1 || s.day === 3) assert.equal(hhmm(s.start), '07:00');
+  }
+});

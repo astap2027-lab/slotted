@@ -201,7 +201,7 @@ function profileFields() {
       ${setSelect('equipment', 'Where you train', [['gym', 'A full gym'], ['home', 'Home gym'], ['bodyweight', 'No equipment']], p.equipment)}
       ${setSelect('sessionsPerWeek', 'Weekly target', [2, 3, 4, 5, 6].map((n) => [n, usingCustom() ? `${n} sessions` : `${n} sessions, ${SPLIT_NAMES[n].toLowerCase()}`]), p.sessionsPerWeek, 'Gym sessions, not counting sport')}
       ${setSelect('sessionLength', 'Session length', [45, 60, 75, 90].map((n) => [n, `${n} minutes`]), p.sessionLength)}
-      ${setSelect('timeOfDay', 'Preferred time', [['afternoon', 'After school (3 to 6pm)'], ['morning', 'Mornings (7 to 9am)'], ['evening', 'Evenings (after 6pm)']], p.timeOfDay || 'afternoon', 'Slotted uses other times only when this one is taken')}
+      ${setSelect('timeOfDay', 'Preferred time', [['afternoon', 'After school (3 to 6pm)'], ['morning', 'Mornings (before school, 7 to 9am)'], ['evening', 'Evenings (after 6pm)'], ['mix', 'Mix of mornings and after school']], p.timeOfDay || 'afternoon', 'Mix uses before school when sport or other commitments take the afternoon')}
       <div class="setrow">
         <span class="lbl">Rest days<small>Slotted won’t plan sessions on these days</small></span>
         ${restDayPicker(state.restDays)}
@@ -263,7 +263,7 @@ const SETUP_STEPS = [
   { id: 'sessionLength', q: 'How long is a session?', options: [
     [45, '45 minutes'], [60, '60 minutes'], [75, '75 minutes'], [90, '90 minutes']] },
   { id: 'timeOfDay', q: 'When do you like to train?', hint: 'Slotted uses other times only when this one is taken.', options: [
-    ['afternoon', 'After school', '3 to 6pm'], ['morning', 'Mornings', '7 to 9am, before school'], ['evening', 'Evenings', 'After 6pm']] },
+    ['afternoon', 'After school', '3 to 6pm'], ['morning', 'Mornings', '7 to 9am, before school'], ['evening', 'Evenings', 'After 6pm'], ['mix', 'Mix of both', 'Before school when the afternoon is taken']] },
   { id: 'ab', q: 'Does your school timetable change week to week?', options: [
     ['same', 'Same every week'], ['A', 'Week A and Week B', 'And this week is Week A'], ['B', 'Week A and Week B', 'And this week is Week B']] },
 ];
@@ -3424,7 +3424,7 @@ function coachContext() {
   const data = trainingData();
   const lines = [];
   lines.push(`Today: ${DAYS[tIdx]} ${fmtDate(today())}.`);
-  lines.push(`Goal: ${GOAL_LABEL[p.goal] || p.goal}. Experience: ${LEVEL_LABEL[p.level] || p.level}. Trains with ${EQUIP_LABEL[p.equipment] || p.equipment}. Weekly target: ${p.sessionsPerWeek} gym sessions, ${p.sessionLength} minutes each. Prefers to train ${{ morning: 'in the morning', evening: 'in the evening' }[p.timeOfDay] || 'after school'}.`);
+  lines.push(`Goal: ${GOAL_LABEL[p.goal] || p.goal}. Experience: ${LEVEL_LABEL[p.level] || p.level}. Trains with ${EQUIP_LABEL[p.equipment] || p.equipment}. Weekly target: ${p.sessionsPerWeek} gym sessions, ${p.sessionLength} minutes each. Prefers to train ${{ morning: 'in the morning', evening: 'in the evening', mix: 'before school or after school, whichever is free' }[p.timeOfDay] || 'after school'}.`);
   lines.push(usingCustom()
     ? `Follows their own routine: ${state.routine.workouts.map((w) => `${w.name} (${w.exercises.map((e) => e.name).filter(Boolean).join(', ')})`).join('; ')}.`
     : `Follows Slotted's suggested plan: ${SPLIT_NAMES[p.sessionsPerWeek]}.`);

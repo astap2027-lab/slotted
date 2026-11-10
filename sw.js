@@ -1,5 +1,5 @@
 // Offline support: serve the app shell from cache, update in the background.
-const CACHE = 'slotted-v26';
+const CACHE = 'slotted-v27';
 const SHELL = ['./', './index.html', './styles.css', './js/app.js', './js/scheduler.js', './js/progress.js', './js/stats.js', './js/exercises.js', './js/units.js', './js/tracking.js', './js/timetable.js', './js/adjust.js', './js/freshness.js', './js/anatomy.js', './js/workout.js', './js/readiness.js', './js/coach.js', './js/store.js', './privacy', './js/sync.js', './manifest.webmanifest', './icon.svg', './icons/icon-192.png', './icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
