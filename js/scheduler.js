@@ -248,9 +248,18 @@ export function freeGaps(blocks, day, window) {
 }
 
 // Preference for a start time: lower is better. `when` is the athlete's preferred time of day.
-export const TIME_PREFS = ['afternoon', 'morning', 'evening'];
+export const TIME_PREFS = ['afternoon', 'morning', 'evening', 'mix'];
 function timePref(t, when = 'afternoon') {
   const h = t / 60;
+  // Mix: after school when it's free; before school when sport or other commitments take the afternoon.
+  if (when === 'mix') {
+    if (h >= 15 && h < 18) return 0;
+    if (h >= 7 && h < 9) return 0.5;
+    if (h >= 6 && h < 7) return 1.5; // very early: an evening slot is better, a 6am start only if nothing else fits
+    if (h >= 18 && h < 20) return 1;
+    if (h >= 9 && h < 12) return 1;
+    return 3.5;
+  }
   if (when === 'morning') {
     if (h >= 7 && h < 9) return 0;
     if (h >= 5 && h < 7) return 0.3;
