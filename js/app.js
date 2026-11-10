@@ -8,7 +8,7 @@ import { QUESTIONS, EXTRAS, readiness, adjustment, applyAdjustment, extrasText }
 import { askCoach, formatReply, STARTERS } from './coach.js';
 import {
   weekBlocks, windowFor, dayWindows, parseAvailability, validateChange, applyChanges, describeChange, touchesFixed,
-  timetableContext, askTimetable, BLOCK_TYPES, planWithFlex, appliesTo, SPORT_EFFORTS, sportEffort, photoChanges, PHOTO_MAX_IMAGES,
+  timetableContext, askTimetable, BLOCK_TYPES, planWithFlex, appliesTo, SPORT_EFFORTS, sportEffort, photoPlan, PHOTO_MAX_IMAGES,
 } from './timetable.js';
 import { proposeChanges, applyProposal } from './adjust.js';
 import { load, save, exportJSON, importJSON, reset, defaultState } from './store.js';
@@ -1332,16 +1332,16 @@ function wireProposals(rerender) {
 // ---------- timetable changes in plain words ----------
 // The athlete types a change ("I finish school at 1:05 on Tuesdays"). Slotted reads it (or asks the AI),
 // checks it, shows exactly what would change, and only applies it when they say so.
-let avail = { text: '', busy: false, changes: null, bad: [], note: '', done: '', photo: false };
+let avail = { text: '', busy: false, changes: null, bad: [], note: '', done: '', photo: false, raw: null };
 // Photos of a timetable waiting to be read: [{ media_type, data (base64), url (for the thumbnail) }]. Never saved.
 let availImgs = [];
-let availWeek = 'both'; // with Week A/B on: which week a photo shows ('A', 'B' or 'both')
-const availTemplates = () => (state.useAB && avail.photo && availWeek !== 'both' ? { templates: [availWeek] } : {});
+let availWeek = 'both'; // with Week A/B on and one photo: which week it shows ('A', 'B' or 'both')
+let availSwap = false; // with two photos: swap which one is Week A and which is Week B
 
-// Shrink a photo on the device before it is sent: longest side 1600px, JPEG.
+// Shrink a photo on the device before it is sent: longest side 2000px, JPEG (small print stays readable).
 async function shrinkImage(file) {
   const bmp = await createImageBitmap(file);
-  const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+  const scale = Math.min(1, 2000 / Math.max(bmp.width, bmp.height));
   const c = document.createElement('canvas');
   c.width = Math.max(1, Math.round(bmp.width * scale));
   c.height = Math.max(1, Math.round(bmp.height * scale));
@@ -1349,7 +1349,7 @@ async function shrinkImage(file) {
   g.fillStyle = '#fff';
   g.fillRect(0, 0, c.width, c.height);
   g.drawImage(bmp, 0, 0, c.width, c.height);
-  const url = c.toDataURL('image/jpeg', 0.85);
+  const url = c.toDataURL('image/jpeg', 0.9);
   return { media_type: 'image/jpeg', data: url.slice(url.indexOf(',') + 1), url };
 }
 const AVAIL_EXAMPLES = ['I finish school at 1:05 pm every Tuesday', 'I can’t train this Saturday', 'Basketball training Thursday 4–6 pm', 'My legs are still sore and I’m exhausted'];
@@ -1379,33 +1379,69 @@ function planDiff(before, after) {
   return out;
 }
 
+// What a photo would change, week by week, worked out by the app from the rows the AI copied.
+const photoPlanNow = () => photoPlan(avail.raw, state, { choice: availWeek, swap: availSwap });
+function applyPhotoPlan(st, plan, ctx) {
+  return plan.groups.reduce((acc, g) => (g.changes.length ? applyChanges(acc, g.changes, ctx.key, ctx.tIdx, g.templates ? { templates: g.templates } : {}) : acc), st);
+}
+const dayRange = (d) => `${DAYS[d.day]} ${fmtTime(toMin(d.start))} to ${fmtTime(toMin(d.end))}`;
+
+function photoPreviewHtml(ctx) {
+  const plan = photoPlanNow();
+  const total = plan.groups.reduce((t, g) => t + g.changes.length, 0);
+  const lost = plan.unreadable.length ? `<p class="small muted">Couldn’t read: ${esc(plan.unreadable.join('; '))}.</p>` : '';
+  if (!plan.groups.length) {
+    return `<div class="avail-preview" role="status"><p class="small">${esc(avail.note || 'Slotted couldn’t find a timetable in that photo.')}</p>${lost}
+      <p class="small muted">Try a clear, straight-on screenshot, or add your commitments by hand below.</p></div>`;
+  }
+  const next = applyPhotoPlan(state, plan, ctx);
+  const diff = planDiff(ctx.entry.plan, simulatePlan(next, ctx.key).plan);
+  const title = (g) => (g.week === 'all' ? 'Read from your photo' : `Week ${g.week}`);
+  const swapBtn = state.useAB && plan.groups.length === 2 ? '<button type="button" class="ghost" id="av-swap">Swap Week A and Week B</button>' : '';
+  return `<div class="avail-preview" role="status">
+    ${plan.groups.map((g) => {
+      const school = new Set(g.changes.filter((c) => (c.block && c.block.type === 'school') || (c.match && c.match.type === 'school')).map((c) => (c.days ? c.days[0] : c.match.day)));
+      return `<div class="photo-week"><span class="label">${esc(title(g))}</span>
+        <ul class="photo-days">${g.days.map((d) => `<li><b>${esc(dayRange(d))}</b><small>${plural(d.classes, 'class', 'classes')}, first ${esc(d.firstClass || 'class')}, last ${esc(d.lastClass || 'class')}${d.freeAfter ? ', free period after' : ''}${school.has(d.day) ? '' : '. Same as now'}</small></li>`).join('')}</ul>
+        ${g.changes.filter((c) => c.block && c.block.type !== 'school').map((c) => `<p class="small">${esc(describeChange(c, ctx.key, ctx.tIdx))}</p>`).join('')}
+      </div>`;
+    }).join('')}
+    ${swapBtn}
+    ${avail.note ? `<p class="small muted">${esc(avail.note)}</p>` : ''}
+    ${plan.notes.map((n) => `<p class="small note-warn">${esc(n)}</p>`).join('')}
+    ${lost}
+    ${total ? `<span class="label">This week’s plan</span>${diff.length ? `<ul class="propmoves">${diff.map((d) => `<li>${esc(d)}</li>`).join('')}</ul>` : '<p class="small">No sessions need to move.</p>'}` : '<p class="small">Nothing new: your timetable already matches this photo.</p>'}
+    <p class="small muted">School shows from the first to the last class each day, and free periods at the start or end of a day aren’t counted. Check the times against your timetable. You can fix any of them afterwards in My week.</p>
+    <div class="actions">${total ? '<button type="button" class="primary" id="av-yes">Apply</button>' : ''}<button type="button" class="ghost" id="av-no">${total ? 'Cancel' : 'Close'}</button></div>
+  </div>`;
+}
+
 function availPreview() {
   const ctx = weekCtx();
-  if (avail.busy) return '<p class="small muted" role="status">Working it out…</p>';
+  if (avail.busy) return `<p class="small muted" role="status">${avail.photo ? 'Reading your timetable. This can take up to half a minute…' : 'Working it out…'}</p>`;
+  if (avail.photo && avail.raw !== null && !avail.done) return photoPreviewHtml(ctx);
   if (avail.done) return `<div class="avail-done" role="status"><p class="small"><b>${esc(avail.done)}</b></p>${proposalsCard(ctx)}</div>`;
   if (!avail.changes) return avail.note ? `<p class="small" role="status">${esc(avail.note)}</p>` : '';
   const good = avail.changes;
   if (!good.length) {
     return `<div class="avail-preview" role="status"><p class="small">${esc(avail.note || 'Slotted couldn’t work out a change from that.')}</p>
       ${avail.bad.length ? `<ul class="small">${avail.bad.map((b) => `<li>${esc(b)}</li>`).join('')}</ul>` : ''}
-      <p class="small muted">Try naming the day and time, like “I finish school at 2:30 on Wednesdays”, or change it below in My week.</p></div>`;
+      <p class="small muted">${avail.photo ? 'You can add your commitments by hand below.' : 'Try naming the day and time, like “I finish school at 2:30 on Wednesdays”, or change it below in My week.'}</p></div>`;
   }
-  const next = applyChanges(state, good, ctx.key, ctx.tIdx, availTemplates());
+  const next = applyChanges(state, good, ctx.key, ctx.tIdx);
   const sim = simulatePlan(next, ctx.key);
   const diff = planDiff(ctx.entry.plan, sim.plan);
   // Locked or hand-placed sessions stay put; say so if a change now clashes with one.
   const clashes = sim.fixed.filter((s) => !ctx.isDone(s) && !ctx.isPast(s)
     && !freeGaps(weekBlocks(next, ctx.key), s.day, windowFor(next, ctx.key, s.day)).some(([a, z]) => s.start >= a && s.end <= z));
   return `<div class="avail-preview" role="status">
-    <span class="label">${avail.photo ? `Read from your photo${state.useAB && availWeek !== 'both' ? `, for Week ${availWeek}` : ''}` : 'What will change'}</span>
-    ${avail.photo && avail.note ? `<p class="small muted">${esc(avail.note)}</p>` : ''}
+    <span class="label">What will change</span>
     <ul class="propmoves">${good.map((c) => `<li>${esc(describeChange(c, ctx.key, ctx.tIdx))}${touchesFixed(c, state, ctx.key) ? ' <span class="badge">Fixed commitment</span>' : ''}</li>`).join('')}</ul>
     ${avail.bad.length ? `<p class="small muted">Left out: ${esc(avail.bad.join(' '))}</p>` : ''}
     <span class="label">This week’s plan</span>
     ${diff.length ? `<ul class="propmoves">${diff.map((d) => `<li>${esc(d)}</li>`).join('')}</ul>` : '<p class="small">No sessions need to move.</p>'}
     ${clashes.map((s) => `<p class="small note-warn">${esc(s.name)} is ${s.locked ? 'locked' : 'placed by hand'} on ${slotText(s)} and would clash. It stays put; move it yourself if you need to.</p>`).join('')}
     ${good.some((c) => c.op === 'feel') ? '<p class="small muted">Slotted will then check whether any sessions should move or get lighter, and ask you first.</p>' : ''}
-    ${avail.photo ? '<p class="small muted">Check the times against your timetable. You can fix any of them afterwards in My week.</p>' : ''}
     <div class="actions"><button type="button" class="primary" id="av-yes">Apply</button><button type="button" class="ghost" id="av-no">Cancel</button></div>
   </div>`;
 }
@@ -1422,8 +1458,8 @@ function availHtml() {
         <label class="btn" for="av-file">${icon('photo')}Add a photo of your timetable</label>
         <input id="av-file" class="sr" type="file" accept="image/*" multiple>
         ${availImgs.length ? `<div class="avail-thumbs">${availImgs.map((im, i) => `<span class="avail-thumb"><img src="${im.url}" alt="Timetable photo ${i + 1}"><button type="button" data-avimg="${i}" aria-label="Remove photo ${i + 1}">×</button></span>`).join('')}</div>` : ''}
-        ${availImgs.length && state.useAB ? `<div class="field"><label for="av-week">This photo shows</label><select id="av-week">${[['both', 'Every week (A and B)'], ['A', 'Week A'], ['B', 'Week B']].map(([v, t]) => `<option value="${v}" ${availWeek === v ? 'selected' : ''}>${t}</option>`).join('')}</select></div>` : ''}
-        <p class="hint" style="margin:0">${availImgs.length ? 'The photo is sent to the AI to be read and isn’t saved.' : 'A screenshot or clear photo works best. Crop out your name first if you like.'}</p>
+        ${availImgs.length === 1 && state.useAB ? `<div class="field"><label for="av-week">This photo shows</label><select id="av-week">${[['both', 'Every week (A and B)'], ['A', 'Week A'], ['B', 'Week B']].map(([v, t]) => `<option value="${v}" ${availWeek === v ? 'selected' : ''}>${t}</option>`).join('')}</select></div>` : ''}
+        <p class="hint" style="margin:0">${availImgs.length === 2 && state.useAB ? 'Photo 1 is read as Week A and photo 2 as Week B, unless they are labelled. You can swap them after reading. ' : ''}${availImgs.length ? 'The photos are sent to the AI to be read and aren’t saved.' : 'A screenshot or clear photo works best. Crop out your name first if you like.'}</p>
       </div>
       <div class="actions"><button type="submit" class="primary">${availImgs.length ? 'Read my timetable' : 'Check it'}</button></div>
     </form>
@@ -1442,7 +1478,8 @@ function wireAvail(rerender) {
     const ctx = weekCtx();
     const said = text.value.trim();
     if (!said && !availImgs.length) return;
-    avail = { text: said, busy: false, changes: null, bad: [], note: '', done: '', photo: availImgs.length > 0 };
+    avail = { text: said, busy: false, changes: null, bad: [], note: '', done: '', photo: availImgs.length > 0, raw: null };
+    availSwap = false;
     let changes;
     if (avail.photo) {
       avail.busy = true; rerender();
@@ -1457,8 +1494,9 @@ function wireAvail(rerender) {
         }[res.error] || 'The AI isn’t available right now, so the photo couldn’t be read. You can add your commitments by hand below.';
         rerender(); return;
       }
-      changes = photoChanges(res.changes, state, availTemplates());
-      avail.note = res.note || (changes.length ? '' : 'Nothing new was found in that photo. Your timetable may already match it.');
+      avail.raw = res.photo || {};
+      avail.note = res.photo ? res.note : (res.note || 'That couldn’t be read. Try a clear screenshot of your timetable.');
+      rerender(); return;
     } else ({ changes } = parseAvailability(said, { todayIdx: ctx.tIdx }));
     if (!avail.photo && !changes.length) {
       avail.busy = true; rerender();
@@ -1484,18 +1522,21 @@ function wireAvail(rerender) {
   const yes = document.getElementById('av-yes');
   if (yes) yes.addEventListener('click', () => {
     const ctx = weekCtx();
-    const list = avail.changes;
-    state = applyChanges(state, list, ctx.key, ctx.tIdx, availTemplates());
-    const fromPhoto = avail.photo;
+    const fromPhoto = avail.photo && avail.raw !== null;
+    const plan = fromPhoto ? photoPlanNow() : null;
+    const list = fromPhoto ? plan.groups.flatMap((g) => g.changes) : avail.changes;
+    state = fromPhoto ? applyPhotoPlan(state, plan, ctx) : applyChanges(state, list, ctx.key, ctx.tIdx);
     // Rebuild the weeks the changes touch (this week now; next week rebuilds itself when it starts).
     replan(ctx.key);
     commit();
-    avail = { text: '', busy: false, changes: null, bad: [], note: '', photo: false, done: fromPhoto ? `Done: ${plural(list.length, 'change')} from your photo applied.` : `Done: ${list.map((c) => describeChange(c, ctx.key, ctx.tIdx)).join('; ')}.` };
+    avail = { text: '', busy: false, changes: null, bad: [], note: '', photo: false, raw: null, done: fromPhoto ? `Done: ${plural(list.length, 'change')} from your photo applied.` : `Done: ${list.map((c) => describeChange(c, ctx.key, ctx.tIdx)).join('; ')}.` };
     if (fromPhoto) availImgs = [];
     rerender(); renderSideWeek();
   });
   const no = document.getElementById('av-no');
-  if (no) no.addEventListener('click', () => { avail = { ...avail, changes: null, bad: [], note: '' }; rerender(); });
+  if (no) no.addEventListener('click', () => { avail = { ...avail, changes: null, bad: [], note: '', raw: null }; rerender(); });
+  const swap = document.getElementById('av-swap');
+  if (swap) swap.addEventListener('click', () => { availSwap = !availSwap; rerender(); });
   const file = document.getElementById('av-file');
   if (file) file.addEventListener('change', async () => {
     const picked = [...file.files].filter((f) => /^image\//.test(f.type)).slice(0, Math.max(0, PHOTO_MAX_IMAGES - availImgs.length));
@@ -1503,16 +1544,16 @@ function wireAvail(rerender) {
     for (const f of picked) {
       try { availImgs.push(await shrinkImage(f)); } catch { toast('Couldn’t read that image. Try a screenshot, JPG or PNG.'); }
     }
-    avail = { ...avail, changes: null, bad: [], note: '', done: '' };
+    avail = { ...avail, changes: null, bad: [], note: '', done: '', raw: null };
     rerender();
   });
   app.querySelectorAll('[data-avimg]').forEach((b) => b.addEventListener('click', () => {
     availImgs.splice(Number(b.dataset.avimg), 1);
-    avail = { ...avail, changes: null, bad: [], note: '' };
+    avail = { ...avail, changes: null, bad: [], note: '', raw: null };
     rerender();
   }));
   const wk = document.getElementById('av-week');
-  if (wk) wk.addEventListener('change', () => { availWeek = wk.value; avail = { ...avail, changes: null, bad: [], note: '' }; rerender(); });
+  if (wk) wk.addEventListener('change', () => { availWeek = wk.value; rerender(); });
   wireProposals(rerender);
 }
 
