@@ -1,7 +1,10 @@
 // Muscle freshness: an estimate of how recovered each muscle is, built only from what was recorded:
 // ticked sets, sessions marked done, and Strava activities. Each hard set adds load to the muscles it
 // works; load fades over the following days. Freshness = how much of that load is gone.
-import { exerciseForMove, groupWeights } from './exercises.js';
+// Every detailed muscle (quads, hamstrings and so on, down to each head) is tracked on its own; the
+// body-map groups show their most tired muscle. How hard a set was (weight against your best, time,
+// distance, and the optional effort tap) scales its load, and a big recent week slows recovery a little.
+import { exerciseForMove, groupWeights, muscleWeights, MUSCLE_INFO, trackOf, secOf } from './exercises.js';
 import { moveKeyForName } from './scheduler.js';
 
 export const MUSCLES = [
@@ -15,7 +18,46 @@ export const MUSCLES = [
   { id: 'hamstrings', label: 'Hamstrings', recoverHours: 32, full: 11 },
   { id: 'glutes', label: 'Glutes', recoverHours: 30, full: 12 },
   { id: 'calves', label: 'Calves', recoverHours: 22, full: 10 },
+  { id: 'forearms', label: 'Forearms', recoverHours: 20, full: 9 },
+  { id: 'hips', label: 'Hips', recoverHours: 24, full: 10 },
+  { id: 'shins', label: 'Shins', recoverHours: 20, full: 8 },
 ];
+// Body-map groups drawn on the outline. The others (forearms, hips, shins) are listed but not drawn.
+export const MAP_GROUPS = new Set(['chest', 'shoulders', 'back', 'biceps', 'triceps', 'core', 'quads', 'hamstrings', 'glutes', 'calves']);
+// Every detailed muscle, recovering at its group's pace.
+export const PARTS = Object.entries(MUSCLE_INFO).map(([id, m]) => ({ id, label: m.label, group: m.group }));
+const PARTS_OF = PARTS.reduce((o, p) => ((o[p.group] = o[p.group] || []).push(p.id), o), {});
+
+// How much one tap of effort changes a set's load. No tap means a normal hard set.
+export const EFFORT = { easy: { label: 'Easy', factor: 0.7 }, hard: { label: 'Hard', factor: 1 }, fail: { label: 'To failure', factor: 1.2 } };
+const fClamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const fE1rm = (kg, reps) => (kg > 0 && reps > 0 ? kg * (1 + Math.min(reps, 15) / 30) : 0);
+
+// How hard one set was compared with a normal working set (1). ref = best estimated 1-rep max on this exercise.
+export function setLoad(set, track, ref = 0, assisted = false) {
+  if (!set) return 0;
+  let f = (EFFORT[set.effort] || EFFORT.hard).factor;
+  const kg = Number(set.kg) || 0;
+  const reps = Number(set.reps) || 0;
+  if ((track === 'weight_reps' || track === 'reps' || !track) && kg > 0 && ref > 0 && !assisted) {
+    // Light sets count for less; sets near your best count in full.
+    f *= fClamp(0.6 + 0.45 * (fE1rm(kg, reps) / ref), 0.6, 1.05);
+  } else if (track === 'duration' || track === 'weight_duration') {
+    f *= fClamp(secOf(set, track) / 40, 0.5, 1.3);
+  } else if (track === 'distance_duration' || track === 'weight_distance') {
+    f *= fClamp((Number(set.m) || 0) / 40, 0.5, 1.3);
+  }
+  return fClamp(f, 0.3, 1.5);
+}
+
+// Detailed muscles an exercise works. Exercises outside the library spread their group weights over the group.
+export function partsFor(move, name, group) {
+  const ex = exerciseForMove(move, name);
+  if (ex) return muscleWeights(ex);
+  const out = {};
+  for (const [g, w] of Object.entries(musclesFor(move, name, group))) for (const id of PARTS_OF[g] || []) out[id] = Math.max(out[id] || 0, w);
+  return out;
+}
 
 // How much each set of a movement works each muscle (1 = main muscle).
 const MOVE_MUSCLES = {
@@ -98,6 +140,19 @@ const atTime = (weekStart, day, minutes) => {
   return d;
 };
 
+// Best estimated 1-rep max for each logged move, so a set can be compared with what you can lift.
+function bestRefs(log) {
+  const ref = {};
+  for (const sessions of Object.values(log || {})) {
+    for (const moves of Object.values(sessions || {})) {
+      for (const [move, list] of Object.entries(moves || {})) {
+        for (const x of list || []) if (x && x.done) ref[move] = Math.max(ref[move] || 0, fE1rm(Number(x.kg) || 0, Number(x.reps) || 0));
+      }
+    }
+  }
+  return ref;
+}
+
 /**
  * @param data.log        state.log
  * @param data.history    state.history (for when each session was planned and which were marked done)
@@ -107,41 +162,43 @@ const atTime = (weekStart, day, minutes) => {
  * @param data.now        Date
  */
 export function computeFreshness({ log = {}, history = {}, weekStart, exercise = () => ({}), activities = [], now = new Date() }) {
-  const load = Object.fromEntries(MUSCLES.map((m) => [m.id, 0]));
-  const last = {};
   const spec = Object.fromEntries(MUSCLES.map((m) => [m.id, m]));
+  const groupOf = Object.fromEntries(PARTS.map((p) => [p.id, p.group]));
+  const windowStart = now.getTime() - 7 * 864e5;
+  const work = []; // { parts: { id: weight }, amount, t }
   let sets = 0;
   let sessions = 0;
   let recentActivities = 0;
-  const windowStart = now.getTime() - 7 * 864e5;
+  const refs = bestRefs(log);
 
-  // Adds load and returns true when the work falls inside the 7-day window.
-  const add = (muscles, amount, when) => {
+  // Records work and returns true when it falls inside the 7-day window.
+  // Work later today counts now (sets can be ticked before the planned start); work on a later day doesn't count yet.
+  const dayEnd = new Date(now).setHours(23, 59, 59, 999);
+  const add = (parts, amount, when) => {
+    if (when.getTime() > dayEnd) return false;
     const t = Math.min(when.getTime(), now.getTime());
     if (t < windowStart || amount <= 0) return false;
-    const hours = (now.getTime() - t) / 36e5;
-    for (const [id, w] of Object.entries(muscles)) {
-      if (!spec[id]) continue;
-      load[id] += amount * w * Math.exp(-hours / spec[id].recoverHours);
-      if (w >= 0.5 && (!last[id] || t > last[id])) last[id] = t;
-    }
+    work.push({ parts, amount, t });
     return true;
   };
 
   for (const [wk, wkSessions] of Object.entries(history)) {
     const plan = wkSessions.plan || [];
     const logged = log[wk] || {};
-    // Ticked sets.
+    // Ticked sets, each scaled by how hard it was.
     for (const [sk, moves] of Object.entries(logged)) {
       const s = plan.find((p) => p.key === sk);
       const when = atTime(weekStart(wk), s ? s.day : 0, s ? s.start : null);
       let counted = false;
       for (const [move, list] of Object.entries(moves)) {
-        const done = (list || []).filter((x) => x && x.done).length;
-        if (!done) continue;
+        const done = (list || []).filter((x) => x && x.done);
+        if (!done.length) continue;
         const info = exercise(move) || {};
-        if (!add(musclesFor(move, info.name, info.group), done, when)) continue;
-        sets += done;
+        const ex = exerciseForMove(move, info.name);
+        const track = ex ? trackOf(ex) : null;
+        const amount = done.reduce((t, x) => t + setLoad(x, track, refs[move], !!(ex && ex.load === 'assisted')), 0);
+        if (!add(partsFor(move, info.name, info.group), amount, when)) continue;
+        sets += done.length;
         counted = true;
       }
       if (counted) sessions++;
@@ -155,7 +212,7 @@ export function computeFreshness({ log = {}, history = {}, weekStart, exercise =
       let counted = false;
       for (const x of s.exercises) {
         const info = exercise(x.move) || {};
-        if (add(musclesFor(x.move, x.name || info.name, info.group), Number(x.sets) || 0, when)) counted = true;
+        if (add(partsFor(x.move, x.name || info.name, info.group), Number(x.sets) || 0, when)) counted = true;
       }
       if (counted) sessions++;
     }
@@ -166,17 +223,45 @@ export function computeFreshness({ log = {}, history = {}, weekStart, exercise =
     const [y, m, d] = a.date.split('-').map(Number);
     const [hh, mm] = String(a.start || '12:00').split(':').map(Number);
     const { muscles, sets: amount } = activityLoad(a);
-    if (add(muscles, amount, new Date(y, m - 1, d, hh, mm))) recentActivities++;
+    const parts = {};
+    for (const [g, w] of Object.entries(muscles)) for (const id of PARTS_OF[g] || []) parts[id] = w;
+    if (add(parts, amount, new Date(y, m - 1, d, hh, mm))) recentActivities++;
   }
 
-  const muscles = MUSCLES.map((m) => ({
-    id: m.id,
-    label: m.label,
-    fresh: Math.round(100 * (1 - Math.min(1, load[m.id] / m.full))),
-    lastWorked: last[m.id] ? new Date(last[m.id]) : null,
-  }));
+  // Recent volume per muscle (undecayed). A week well past a muscle's usual full load slows its recovery.
+  const vol = {};
+  for (const w of work) for (const [id, wt] of Object.entries(w.parts)) vol[id] = (vol[id] || 0) + w.amount * wt;
+  const load = {};
+  const last = {};
+  for (const w of work) {
+    const hours = (now.getTime() - w.t) / 36e5;
+    for (const [id, wt] of Object.entries(w.parts)) {
+      const g = spec[groupOf[id]];
+      if (!g) continue;
+      const slow = 1 + 0.3 * fClamp(((vol[id] || 0) - g.full) / g.full, 0, 1);
+      load[id] = (load[id] || 0) + w.amount * wt * Math.exp(-hours / (g.recoverHours * slow));
+      if (wt >= 0.5 && (!last[id] || w.t > last[id])) last[id] = w.t;
+    }
+  }
+
+  const detail = PARTS.map((p) => {
+    const g = spec[p.group];
+    return {
+      id: p.id, label: p.label, group: p.group,
+      fresh: Math.round(100 * (1 - Math.min(1, (load[p.id] || 0) / g.full))),
+      lastWorked: last[p.id] ? new Date(last[p.id]) : null,
+      volume: Math.round((vol[p.id] || 0) * 10) / 10,
+    };
+  });
+  // Each body-map group shows its most tired muscle, so a group is never shown fresher than any part of it.
+  const muscles = MUSCLES.map((m) => {
+    const parts = detail.filter((p) => p.group === m.id);
+    const worst = parts.reduce((a, b) => (b.fresh < a.fresh ? b : a), parts[0]);
+    const lastT = Math.max(0, ...parts.map((p) => (p.lastWorked ? p.lastWorked.getTime() : 0)));
+    return { id: m.id, label: m.label, fresh: worst ? worst.fresh : 100, lastWorked: lastT ? new Date(lastT) : null, parts: parts.map((p) => p.id) };
+  });
   // Counts only cover the 7-day window, so they match what the estimate is built from.
-  return { muscles, sets, sessions, activities: recentActivities, hasData: sets > 0 || sessions > 0 || recentActivities > 0 };
+  return { muscles, detail, sets, sessions, activities: recentActivities, hasData: sets > 0 || sessions > 0 || recentActivities > 0 };
 }
 
 export const freshnessLevel = (pct) => (pct >= 85 ? 0 : pct >= 65 ? 1 : pct >= 40 ? 2 : 3);

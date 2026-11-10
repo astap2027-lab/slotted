@@ -25,9 +25,11 @@ A gym planner for students who play sport. It fits gym sessions around school, s
 - `js/app.js`: every screen (Home, This week, My week, Routine, Workout mode, Progress, Coach, Settings, setup), routing, logging and sync.
 - `js/scheduler.js`: week planning (free time, session placement, spacing, sport-day rules, time-of-day preference), splits, A/B weeks, streaks, suggested exercises (`MOVES`), custom routines.
 - `js/exercises.js`: **the exercise library** (about 200 exercises), detailed muscles (`MUSCLE_INFO`, grouped by `MUSCLE_GROUPS`), tracking types, load types, search, alternatives, custom exercises and validation.
-- `js/freshness.js`: muscle recovery estimate (unchanged model; it now takes muscle maps from the library).
+- `js/freshness.js`: muscle recovery estimate per detailed muscle (built on the original model), effort and intensity scaling.
 - `js/progress.js`: per-exercise history and personal bests, type-aware (weight, reps, time, distance).
 - `js/stats.js`: Home and Progress numbers (consistency, volume, records, finished workouts).
+- `js/timetable.js`: which commitments apply each week, plain-words changes, validation and apply. `js/adjust.js`: fatigue-aware suggestions.
+- `js/units.js`: kg/lb conversion, bar and plates. `js/tracking.js`: how each tracking type is logged, suggested, compared and written out.
 - `js/workout.js`: rest timer lengths, plates, warm-ups, older swap logic. `js/readiness.js`: daily check-in. `js/coach.js`: coach instructions and client. `js/sync.js`: merging two devices. `js/store.js`: saving, defaults, backup.
 - `styles.css`: the design system. `index.html`, `privacy.html`, `sw.js`, `manifest.webmanifest`.
 
@@ -43,25 +45,26 @@ The full brief is in `docs/upgrade-brief.md`. Axel chose:
 2. **Effort:** one optional tap per exercise after it's done (Easy / Hard / To failure). Skipping it means "normal hard set".
 3. **Delivery:** in stages, tested as each lands.
 
-### Stage 1: exercise library and tracking (in progress)
-Done:
-- `js/exercises.js` with the full library, detailed muscle mapping (primary 1, secondary 0.5, stabiliser 0.2, overridable per muscle), search and filters, alternatives, custom exercise validation, duplicate detection, mapping suggestions, `volumeOf`, `secOf`, `targetOf`. Tests in `tests/exercises.test.mjs`.
-- Recovery (`musclesFor`), progress history, records and volume use the library. Dumbbell pairs count twice in volume; assisted, timed and distance work have no volume.
-- `sync.js` merges `customExercises`; `sw.js` and the preview build include `exercises.js`.
+### Stage 1: exercise library and tracking (done)
+- `js/exercises.js`: the library, detailed muscle mapping (primary 1, secondary 0.5, stabiliser 0.2), search, alternatives, custom exercise validation, `volumeOf`, `secOf`, `targetOf`.
+- `js/units.js`: kg or lb. Weights are always stored in kg; `fromKg`/`toKg` convert for display and input. lb uses a 45 lb (or 35 lb) bar and lb plates.
+- `js/tracking.js`: per tracking type set fields, weight labels ("kg each hand", "kg added", "kg assistance", "kg total"), suggestions, personal-best checks (heavier, more reps, longer, further) and set text.
+- Workout mode rows follow the tracking type; timed exercises get a large hold timer (finishing fills and ticks the next set). Swap uses `alternativesFor()` with the old fallback.
+- Library page `#library` (Training tab): search, filters, details, history, create/edit/delete own exercises (`state.customExercises`, ids `u_`; deleting keeps `{ deleted: true }` so sync doesn't revive it; renaming keeps the old name in `aka`).
+- Progress, records, recap, summary and coach context are type-aware and use the chosen unit. Assisted exercises are judged on reps.
+- Known leftover: the same exercise logged under two stored keys (for example `core` and `x_plank`) shows twice on Progress; the Library page merges them.
 
-Still to do:
-- `app.js`: import from `exercises.js`; call `setMoveResolver(nameOfMove)` and `setCustomExercises(state.customExercises)` on start, after restoring a backup, and after a sync pull. Add `units: 'kg'` and `customExercises: []` to `defaultState` in `store.js`.
-- **Units:** a kg or lb setting. Store kg, convert for display and input. Plates and warm-ups in lb use a 45 lb bar and lb plates.
-- **Workout mode:** set rows follow the exercise's tracking type (reps; weight and reps; time; weight and time; distance and time; weight and distance). The weight label says what it means ("kg each hand", "kg added", "kg assistance", "kg total"). A large timer for timed exercises (start, pause, resume, reset; finishing fills in and ticks the next set; manual entry still works). Suggestions and "Tick all as planned" follow the tracking type. Personal best toasts match the type (heavier, more reps, longer, further).
-- **Swap:** use `alternativesFor()` (same main muscles and movement, kit the user has). Keep the existing fallback.
-- **Library page** (`#library`, under Training next to Routine): search, filters (muscle group, equipment, primary or secondary muscle, compound or isolation, type), exercise details (muscles by role, equipment, tracking, instructions, alternatives, the user's history with it). "Create exercise" form with duplicate warning and a suggested muscle mapping the user reviews. "Add to a workout" when they use their own routine.
-- **Routine editor:** the name box suggests every library and custom exercise; a known exercise fills in its muscle group automatically.
-- **Progress:** charts and bests per tracking type (`summarise()` returns `kind`: kg, reps, sec or m). Never compare different types as the same thing. Show units.
-- **Coach context:** include sets in their own units and tracking types (time, distance).
-- Then update tests, run `npm test`, check every page in a browser on desktop and phone in both themes, bump `sw.js`, and push.
+### Stage 2: detailed muscles and fatigue (done, branch `claude/stage-2-fatigue`)
+- `freshness.js` tracks every detailed muscle in `MUSCLE_INFO` separately (`detail` in the result; `PARTS`, `partsFor`). Each body-map group shows its most tired muscle, so old group numbers are unchanged for the same training. Forearms, hips and shins are listed too (not drawn on the outline).
+- Set load (`setLoad`): effort tap (Easy 0.7, Hard 1, To failure 1.2; no tap = Hard), weight against your best estimated 1-rep max on that move (0.6 to 1.05), time (sec/40) and distance (m/40). A week well past a muscle's usual full load slows its recovery by up to 30%. Work on a later day than "now" never counts.
+- Effort is stored on each done set as `effort: 'easy' | 'hard' | 'fail'`. The tap appears on the workout card once an exercise's sets are ticked, and in the summary.
+- Check-in (`readiness.js`): the three main answers are unchanged. `EXTRAS` (hours slept, tiredness, stress, feel ready) are optional, each worst answer adds half a point, and `reasons` lists what pulled it down. Home shows the check-in on rest days too (stored by day, as before).
+- Progress recovery: tap a group to see each muscle; tap a muscle for freshness, likely recovery time, a 7-day trend, recent volume (this week and last) and the exercises that worked it (`partWork`, `partVolume` in `stats.js`).
+- Coach context lists tired detailed muscles, effort taps and the optional check-in answers.
 
-### Stage 2: detailed muscles and fatigue
-Track the detailed muscles separately (quads and hamstrings must recover independently). Use weight, reps, effort tap and recent volume in the fatigue estimate, built on the existing model in `freshness.js`. Extend the optional daily check-in (energy, tiredness, sleep hours and quality, soreness, stress, readiness) without making it a chore. Add the map's tap-to-expand detail, recent volume and trends.
+### Stage 3: smart timetable and fatigue-aware changes (done, branch `claude/stage-3-timetable`)
+- `js/timetable.js`: `weekBlocks(state, key)` is now what `blocksFor()` returns: the A/B template, commitments that repeat every N weeks (`every`, `anchor`), minus `history[week].hidden` ids, plus `history[week].extra` one-offs. `windowFor()` gives per-day training hours (`state.dayWindows`, or `history[week].windows` for one week). Block fields added: `flex` (flexible), `before`/`after` (travel or prep minutes, used by `freeGaps`). `planWithFlex()` lets flexible commitments give way only when a week can't fit every session.
+- Plain-words changes: `parseAvailability()` reads common phrasings locally (school/work start or finish times, can't train, new commitments with times, free mornings/evenings, sore muscles and tiredness). Anything else goes to `functions/api/timetable.js` (forced tool call, thinking off, same key, model and daily limit as the coach). Every change goes through `validateChange()`, the user sees a preview with the plan diff, and `applyChanges()` runs only on Apply. The box is on My week and beside the coach chat.
+- `js/adjust.js`: `proposeChanges()` looks at the next two days using estimated muscle freshness at each session's time, today's check-in and what the user said (`history[week].reports[day]`). It suggests swap, move, rest or lighten, each with the reason and what moves. Accept pins moved sessions or adds the key to `history[week].lighten`; No thanks adds the id to `history[week].dismissed`. Locked sessions (`s.locked`, More menu) and commitments are never moved. Shown on This week, flagged on Home, and listed in the coach context (computed without Strava).
+- My week: tap a commitment to edit it (day, times, type, flexible, travel, repeats); one-off changes for this week and next are listed with Undo; "Different hours on some days".
 
-### Stage 3: smart timetable and fatigue-aware changes
-Natural-language availability ("I finish school at 1:05 pm on Tuesdays", "I can't train this Saturday") through the coach: the AI turns it into a structured change, app logic validates it, and the user sees a preview and approves. Add one-off exceptions, fortnightly or rotating schedules, travel and preparation time, fixed versus flexible commitments, and locking individual workouts. Fatigue-aware proposals (move, swap, lighten or rest), each with the reason, what moves, and accept or reject. Fixed commitments are never moved.

@@ -40,6 +40,9 @@ export function mergeStates(local, server) {
     n.done = union(n.done, o.done);
     n.skipDays = union(n.skipDays, o.skipDays);
     n.checkins = { ...(o.checkins || {}), ...(n.checkins || {}) };
+    // Stage 3: what they said about how they feel, and suggestions they turned down, come from both.
+    if (o.reports || n.reports) n.reports = { ...(o.reports || {}), ...(n.reports || {}) };
+    if (o.dismissed || n.dismissed) n.dismissed = union(n.dismissed, o.dismissed);
     if (!n.plan && o.plan) n.plan = clone(o.plan);
   }
 

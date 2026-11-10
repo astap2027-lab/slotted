@@ -3,13 +3,15 @@
 // Nothing is estimated except where a function says so.
 import { addWeeks, keyToDate } from './scheduler.js';
 import { collectHistory, summarise } from './progress.js';
-import { musclesFor, MUSCLES } from './freshness.js';
-import { exerciseForMove, volumeOf, trackOf, secOf } from './exercises.js';
+import { musclesFor, partsFor, MUSCLES } from './freshness.js';
+import { exerciseForMove, volumeOf, trackOf, secOf, roleOf } from './exercises.js';
 
 const ticked = (list) => (list || []).filter((s) => s && s.done);
 const kgOf = (s) => Number(s.kg) || 0;
 const repsOf = (s) => Number(s.reps) || 0;
 const unique = (arr) => [...new Set(arr || [])];
+// Sessions later today still count as today's work (sets can be ticked before the planned start time).
+const endOfDay = (d) => new Date(d).setHours(23, 59, 59, 999);
 
 // When a planned session took place: Monday of its week plus its day, at its start time.
 export function sessionDate(wk, s) {
@@ -177,7 +179,7 @@ export function muscleWork({ history = {}, log = {} }, muscle, now, days = 7, ex
     for (const [sk, moves] of Object.entries(sessions || {})) {
       const s = plan.find((p) => p.key === sk);
       const date = sessionDate(wk, s);
-      if (date.getTime() < from || date.getTime() > now.getTime()) continue;
+      if (date.getTime() < from || date.getTime() > endOfDay(now)) continue;
       for (const [move, list] of Object.entries(moves || {})) {
         const sets = ticked(list);
         if (!sets.length) continue;
@@ -197,4 +199,38 @@ export function hoursUntilFresh(freshAt, now, threshold = 85, stepHours = 3, max
     if (freshAt(new Date(now.getTime() + h * 36e5)) >= threshold) return h;
   }
   return null;
+}
+
+// ---------- detailed muscles ----------
+// Logged work that hit one detailed muscle (for example vastus lateralis), newest first, with its role.
+export function partWork({ history = {}, log = {} }, part, now, days = 14, exercise = () => ({})) {
+  const from = now.getTime() - days * 864e5;
+  const out = [];
+  for (const [wk, sessions] of Object.entries(log)) {
+    const plan = (history[wk] && history[wk].plan) || [];
+    for (const [sk, moves] of Object.entries(sessions || {})) {
+      const s = plan.find((p) => p.key === sk);
+      const date = sessionDate(wk, s);
+      if (date.getTime() < from || date.getTime() > endOfDay(now)) continue;
+      for (const [move, list] of Object.entries(moves || {})) {
+        const sets = ticked(list);
+        if (!sets.length) continue;
+        const info = exercise(move) || {};
+        const w = partsFor(move, info.name, info.group)[part] || 0;
+        if (!w) continue;
+        const ex = exerciseForMove(move, info.name);
+        const role = ex ? roleOf(ex, part) : w >= 1 ? 'primary' : w >= 0.5 ? 'secondary' : 'stabiliser';
+        out.push({ date, session: s ? s.name : '', name: info.name || (ex && ex.name) || move, sets: sets.length, role, weight: w });
+      }
+    }
+  }
+  return out.sort((a, b) => b.date - a.date);
+}
+
+// Weighted sets for one detailed muscle between two times (a helper set counts half, as in recovery).
+export function partVolume(data, part, from, to, exercise = () => ({})) {
+  const days = Math.ceil((to - from) / 864e5) + 1;
+  return Math.round(partWork(data, part, new Date(to), days, exercise)
+    .filter((w) => w.date.getTime() >= from)
+    .reduce((t, w) => t + w.sets * w.weight, 0) * 10) / 10;
 }

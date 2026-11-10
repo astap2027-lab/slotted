@@ -13,7 +13,7 @@ const API_URL = 'https://api.anthropic.com/v1/messages';
 const API_VERSION = '2026-10-21';
 const MAX_TURNS = 12;
 const MAX_CHARS = 2000;
-const MAX_CONTEXT = 6000;
+const MAX_CONTEXT = 9000;
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), {
   status,
