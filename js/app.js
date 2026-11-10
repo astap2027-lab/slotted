@@ -23,7 +23,7 @@ import {
 } from './exercises.js';
 import { unitLabel, fromKg, toKg, barFor, platesFor, weightStep, warmupOptions } from './units.js';
 import {
-  fieldsFor, hasWeight, weightLabel, FIELD_LABEL, normSet, newBest, bestText, suggestSet, setsText, setText,
+  fieldsFor, hasWeight, weightLabel, FIELD_LABEL, normSet, weightNeeded, typedWeight, weightSoFar, newBest, bestText, suggestSet, setsText, setText,
   chartValue, chartCaption, kindUnit, fmtDuration,
 } from './tracking.js';
 import {
@@ -849,6 +849,9 @@ function suggestFor(x, wk, sk, factor = 1) {
   const shown = last && last.map((y) => { const n = normSet(y, track); return { ...n, kg: Number(wt(n.kg)) || 0 }; });
   const step = lex && lex.load === 'assisted' ? 0 : weightStep(units(), state.profile.equipment);
   const res = { ...suggestSet(track, x.reps, shown, { sets: x.sets, step, units: units() }), last, track };
+  // The first time, use the starting weight entered in the routine, if there is one.
+  const start = Number((exerciseInfo()(x.move) || {}).startKg) || 0;
+  if (!last && start > 0 && weightNeeded(track, lex && lex.load)) { res.kg = Number(wt(start)); res.start = true; }
   if (factor === 1 || !res.kg) return res;
   const st = weightStep(units(), state.profile.equipment) || 0.5;
   return { ...res, kg: Math.max(st, Math.round((res.kg * factor) / st) * st), up: false, upText: '', lighter: true };
@@ -1020,14 +1023,18 @@ function exerciseCards(s, key, short) {
     const warm = hasWeight(track) && track === 'weight_reps' && !(lex && ['added', 'assisted'].includes(lex.load));
     const barbell = lex ? lex.equipment === 'barbell' : usesBarbell(x.name);
     const tid = `${s.key}|${x.move}`;
+    const need = weightNeeded(track, lex && lex.load);
+    const unsaved = need && doneSets(sets).some((y) => weightSoFar([y]) === '');
     return `
-    <li class="xcard ${nDone >= x.sets ? 'is-done' : ''}" data-xcard="${esc(x.move)}" data-sets="${x.sets}" data-track="${track}">
+    <li class="xcard ${nDone >= x.sets ? 'is-done' : ''}" data-xcard="${esc(x.move)}" data-sets="${x.sets}" data-track="${track}" data-name="${esc(x.name)}" data-need="${need ? 1 : 0}">
       <div class="xhead">
         <span class="xnum" aria-hidden="true">${idx + 1}</span>
         <div class="xname">${esc(x.name)}${sub ? `<small>${esc(sub)}</small>` : ''}</div>
         <span class="xtarget">${x.sets} × ${esc(x.reps)}</span>
       </div>
-      <p class="xprev">${sug.last ? `Last time ${esc(fmtLast(sug.last, track))}` : 'First time logging this one'}${sug.up ? `<span class="up">${esc(sug.upText)}</span>` : ''}${sug.lighter ? `<span class="up">Light day: ${sug.kg} ${unitLabel(units())}</span>` : ''}</p>
+      <p class="xprev">${sug.last ? `Last time ${esc(fmtLast(sug.last, track))}` : 'First time logging this one'}${sug.up ? `<span class="up">${esc(sug.upText)}</span>` : ''}${sug.lighter ? `<span class="up">Light day: ${sug.kg} ${unitLabel(units())}</span>` : ''}${sug.start && !sug.last ? `<span class="up">Your starting weight: ${sug.kg} ${unitLabel(units())}</span>` : ''}</p>
+      ${unsaved ? '<p class="small muted xnote">Some sets here have no weight saved. Tap a set’s weight box to add it.</p>' : ''}
+      <p class="xneed" role="alert" hidden></p>
       <div class="xtools">
         <button type="button" class="toolbtn" data-tool="swap|${s.key}|${id}" aria-expanded="${openTools.has(`swap|${s.key}|${id}`)}">Swap</button>
         ${warm ? `<button type="button" class="toolbtn" data-tool="warm|${s.key}|${id}" aria-expanded="${openTools.has(`warm|${s.key}|${id}`)}">${barbell ? 'Warm-up and plates' : 'Warm-up'}</button>` : ''}
@@ -1044,7 +1051,9 @@ function exerciseCards(s, key, short) {
           return `<div class="set ${v.done ? 'is-done' : ''}" data-set="${s.key}|${x.move}|${i}">
             <span aria-hidden="true">${i + 1}</span>
             ${fields.map((f) => {
-              const ph = sug[f] === '' || sug[f] === undefined ? (f === 'kg' ? '0' : '') : sug[f];
+              let ph = sug[f] === '' || sug[f] === undefined ? (f === 'kg' ? (need ? unitLabel(units()) : '0') : '') : sug[f];
+              // Once a set has a weight, the sets after it start from the same one.
+              if (f === 'kg' && need) { const so = weightSoFar(sets.slice(0, i)); if (so !== '') ph = wt(so); }
               return `<label class="sr" for="${fid}-${f}">${esc(x.name)}, set ${i + 1}, ${esc(f === 'kg' ? head(f).replace(/^kg/, 'kilograms').replace(/^lb/, 'pounds') : FIELD_LABEL[f].toLowerCase())}</label>
             <input id="${fid}-${f}" data-field="${f}" type="number" inputmode="${BOX[f].mode}" min="0" step="${BOX[f].step}" placeholder="${esc(ph)}" value="${esc(boxValue(v, f, track))}">`;
             }).join('')}
@@ -1055,6 +1064,20 @@ function exerciseCards(s, key, short) {
       ${nDone >= x.sets ? effortHtml(s.key, x.move, sets, x.name) : ''}
     </li>`;
   }).join('');
+}
+
+// Sets after this one start from its weight (their grey placeholder), so each later set is one tap.
+function carryWeight(card, row) {
+  if (!card || card.dataset.need !== '1') return;
+  const kg = row.querySelector('[data-field=kg]');
+  const v = kg && kg.value !== '' ? kg.value : '';
+  if (v === '') return;
+  let after = false;
+  card.querySelectorAll('.set').forEach((r) => {
+    if (r === row) { after = true; return; }
+    const box = r.querySelector('[data-field=kg]');
+    if (after && box && box.value === '') box.placeholder = v;
+  });
 }
 
 // ---------- effort ----------
@@ -1876,6 +1899,7 @@ function wireSessionActions(rerender, opts = {}) {
     const f = inp.dataset.field;
     const v = inp.value === '' ? '' : Number(inp.value);
     log[move][Number(i)] = { ...(log[move][Number(i)] || {}), [f]: f === 'kg' ? toKg(v, units()) : v };
+    if (f === 'kg') { inp.classList.remove('need'); carryWeight(inp.closest('[data-xcard]'), inp.closest('.set')); }
     commit();
   }));
 
@@ -1905,13 +1929,25 @@ function wireSessionActions(rerender, opts = {}) {
     }
     // Empty boxes take the suggested number. Weights are typed in the user's unit and stored in kg.
     const vals = {};
+    const card = row.closest('[data-xcard]');
+    const needKg = card && card.dataset.need === '1';
     row.querySelectorAll('input[data-field]').forEach((inp) => {
       const f = inp.dataset.field;
       const ph = inp.placeholder;
-      const v = inp.value !== '' ? Number(inp.value) : (ph !== '' && !(f === 'kg' && ph === '0') ? Number(ph) : '');
-      inp.value = v;
+      const v = inp.value !== '' ? typedWeight(inp.value) : (ph !== '' && !(f === 'kg' && ph === '0') ? typedWeight(ph) : '');
       vals[f] = f === 'kg' ? toKg(v, units()) : v;
     });
+    // A weighted set needs a weight: ask for it instead of saving a set without one. Typing 0 means "none".
+    if (needKg && vals.kg === '') {
+      const kgBox = row.querySelector('[data-field=kg]');
+      const msg = card.querySelector('.xneed');
+      if (msg) { msg.textContent = `How heavy was ${card.dataset.name}? Type the weight in ${unitLabel(units())}, or 0 for no weight.`; msg.hidden = false; }
+      kgBox.classList.add('need');
+      kgBox.focus();
+      return;
+    }
+    row.querySelectorAll('input[data-field]').forEach((inp) => { const f = inp.dataset.field; if (vals[f] !== '' && vals[f] !== undefined) inp.value = f === 'kg' ? wt(vals[f]) : vals[f]; });
+    carryWeight(card, row);
     const sess = byKey(sk);
     const shown = shownExercises(sess, isShort(sess));
     const ex = shown.find((x) => x.move === move) || { name: 'that lift', move };
@@ -1964,28 +2000,33 @@ function wireSessionActions(rerender, opts = {}) {
     const sk = b.dataset.planned;
     const s = byKey(sk);
     const log = logFor(key, sk);
+    const missing = [];
     for (const x of shownExercises(s, isShort(s))) {
       const sug = suggestFor(x, key, sk, (adjOf(s) || {}).kgFactor || 1);
       log[x.move] = log[x.move] || [];
+      const lex = libFor(x);
+      // The weight this exercise is using: one already entered today, else last time's (or the routine's starting weight).
+      const so = weightSoFar(log[x.move]);
+      const baseKg = so !== '' ? so : (sug.kg !== '' && sug.kg !== undefined ? toKg(sug.kg, units()) : '');
+      if (weightNeeded(sug.track, lex && lex.load) && baseKg === '' && doneSets(log[x.move]).length < x.sets) { missing.push(x.name); continue; }
       for (let i = 0; i < x.sets; i++) {
         const cur = log[x.move][i] || {};
         if (cur.done) continue;
         const set = {};
         for (const f of fieldsFor(sug.track)) {
           const have = f === 'sec' ? boxValue(cur, 'sec', sug.track) : cur[f];
-          set[f] = have !== undefined && have !== '' && have !== 0 ? have : f === 'kg' ? toKg(sug.kg, units()) : sug[f];
+          set[f] = have !== undefined && have !== '' && have !== 0 ? have : f === 'kg' ? baseKg : sug[f];
           if (f === 'kg' && have === 0) set.kg = 0;
         }
         log[x.move][i] = { ...set, done: true };
       }
     }
     commit();
-    if (!completeIfFinished(sk)) { rerender(); toast('Sets logged'); }
+    if (!completeIfFinished(sk)) {
+      rerender();
+      toast(missing.length ? `Add the weight for ${missing.join(', ')} first. The rest are ticked.` : 'Sets logged');
+    }
   }));
-
-  wireHoldTimers(rerender);
-  wireEffort(rerender, key);
-  wireProposals(rerender);
 
   app.querySelectorAll('details.menu').forEach((m) => m.addEventListener('toggle', () => {
     if (m.open) app.querySelectorAll('details.menu[open]').forEach((o) => { if (o !== m) o.open = false; });
@@ -2453,7 +2494,7 @@ function stopRest() {
 function exerciseInfo() {
   const map = {};
   for (const w of (state.routine && state.routine.workouts) || []) {
-    for (const e of w.exercises || []) if (e.name) map[exerciseKey(e.name)] = { name: e.name, group: e.group };
+    for (const e of w.exercises || []) if (e.name) map[exerciseKey(e.name)] = { name: e.name, group: e.group, startKg: e.startKg };
   }
   return (move) => map[move] || { name: moveName(move, state.profile.equipment) };
 }
@@ -2911,6 +2952,8 @@ function routineGroup(lex) {
   return (main && MAPGROUP_TO_GROUP[MUSCLE_INFO[main[0]].group]) || 'legs';
 }
 // Every name the routine editor suggests: the full library, your own exercises and the older list.
+// Show the starting-weight box unless the exercise is known to be bodyweight, timed or assisted.
+const routineWantsWeight = (e) => { const lex = findExercise(e.name); return !e.name || !lex || weightNeeded(trackOf(lex), lex.load); };
 const routineNames = () => {
   const seen = new Set();
   return [...allExercises().map((e) => e.name), ...LIBRARY.map((e) => e.name)]
@@ -2978,12 +3021,13 @@ function renderRoutine() {
         </div>
       </div>
       <div class="exgrid" role="table" aria-label="${esc(w.name)} exercises">
-        <div class="exgrid-head" role="row"><span role="columnheader">Exercise</span><span role="columnheader">Sets</span><span role="columnheader">Reps</span><span role="columnheader">Muscle</span><span></span></div>
+        <div class="exgrid-head" role="row"><span role="columnheader">Exercise</span><span role="columnheader">Sets</span><span role="columnheader">Reps</span><span role="columnheader">Start ${unitLabel(units())}</span><span role="columnheader">Muscle</span><span></span></div>
         ${w.exercises.map((e) => `
         <div class="exline" role="row" data-e="${e.id}">
           <input type="text" list="exlib" value="${esc(e.name)}" placeholder="Exercise" data-efield="name" aria-label="Exercise name">
           <input type="number" inputmode="numeric" min="1" max="10" value="${esc(e.sets)}" data-efield="sets" aria-label="Sets">
           <input type="text" value="${esc(e.reps)}" placeholder="8–12" data-efield="reps" aria-label="Reps">
+          ${routineWantsWeight(e) ? `<input type="number" inputmode="decimal" min="0" step="0.5" value="${e.startKg ? esc(wt(e.startKg)) : ''}" placeholder="${unitLabel(units())}" data-efield="startKg" aria-label="Starting weight in ${unitLabel(units()) === 'lb' ? 'pounds' : 'kilograms'} (optional)">` : '<span class="exline-gap"></span>'}
           <select data-efield="group" aria-label="Muscle group">${GROUPS.map((g) => `<option value="${g}" ${e.group === g ? 'selected' : ''}>${GROUP_LABEL[g]}</option>`).join('')}</select>
           <button type="button" class="ghost" data-edel aria-label="Remove ${esc(e.name || 'exercise')}">×</button>
         </div>`).join('')}
@@ -3032,12 +3076,14 @@ function renderRoutine() {
     const w = findW(i);
     const e = w.exercises.find((x) => x.id === i.closest('[data-e]').dataset.e);
     const f = i.dataset.efield;
+    if (f === 'startKg') { const kg = typedWeight(i.value) === '' ? '' : toKg(typedWeight(i.value), units()); if (kg === '' || !(kg > 0)) delete e.startKg; else e.startKg = kg; save(); return; }
     e[f] = f === 'sets' ? Math.max(1, Math.min(10, Number(i.value) || 3)) : i.value;
     if (f === 'name') {
       const lex = findExercise(i.value.trim());
       const old = LIBRARY.find((l) => l.name.toLowerCase() === i.value.trim().toLowerCase());
       const group = lex ? routineGroup(lex) : old && old.group;
       if (group) { e.group = group; i.closest('[data-e]').querySelector('select').value = group; }
+      save(); renderRoutine(); return;
     }
     save();
   }));
