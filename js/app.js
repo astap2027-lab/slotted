@@ -8,7 +8,7 @@ import { QUESTIONS, EXTRAS, readiness, adjustment, applyAdjustment, extrasText }
 import { askCoach, formatReply, STARTERS } from './coach.js';
 import {
   weekBlocks, windowFor, dayWindows, parseAvailability, validateChange, applyChanges, describeChange, touchesFixed,
-  timetableContext, askTimetable, BLOCK_TYPES, planWithFlex, appliesTo,
+  timetableContext, askTimetable, BLOCK_TYPES, planWithFlex, appliesTo, SPORT_EFFORTS, sportEffort, photoChanges, PHOTO_MAX_IMAGES,
 } from './timetable.js';
 import { proposeChanges, applyProposal } from './adjust.js';
 import { load, save, exportJSON, importJSON, reset, defaultState } from './store.js';
@@ -93,6 +93,7 @@ const ICONS = {
   play: '<path d="M8 5.5v13l10-6.5z"/>',
   check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
   back: '<path d="M14.5 5.5 8 12l6.5 6.5"/>',
+  photo: '<rect x="3.5" y="6.5" width="17" height="12.5" rx="2.5"/><path d="M8.5 6.5 10 4.5h4l1.5 2"/><circle cx="12" cy="12.8" r="3.2"/>',
   spark: '<path d="M12 3.5v4M12 16.5v4M3.5 12h4M16.5 12h4M6 6l2.6 2.6M15.4 15.4 18 18M6 18l2.6-2.6M15.4 8.6 18 6"/>',
 };
 const icon = (n) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n]}</svg>`;
@@ -410,7 +411,7 @@ function blockEditor(b) {
       <div class="field"><label for="e-start">From</label><input id="e-start" name="start" type="time" value="${b.start}"></div>
       <div class="field"><label for="e-end">To</label><input id="e-end" name="end" type="time" value="${b.end}"></div>
     </div>
-    <div class="field" ${b.type === 'sport' ? '' : 'hidden'} data-eint><label for="e-int">How hard is it?</label><select id="e-int" name="intensity"><option value="light" ${b.intensity !== 'hard' ? 'selected' : ''}>Training</option><option value="hard" ${b.intensity === 'hard' ? 'selected' : ''}>Game or race</option></select></div>
+    <div class="field" ${b.type === 'sport' ? '' : 'hidden'} data-eint><label for="e-int">How hard is it?</label><select id="e-int" name="intensity">${Object.entries(SPORT_EFFORTS).map(([k, v]) => `<option value="${k}" ${sportEffort(b.intensity) === k ? 'selected' : ''}>${v.label} (${v.sub.toLowerCase()})</option>`).join('')}</select></div>
     ${blockExtras(b)}
     <p class="errors" role="alert"></p>
     <div class="actions"><button type="submit" class="primary">Save</button><button type="button" class="ghost" data-editcancel>Cancel</button></div>
@@ -535,7 +536,7 @@ function renderWeek() {
             <div class="items">
               ${byDay[d].length ? byDay[d].map((b) => `
                 <span class="item ${b.type}${b.flex ? ' flex' : ''}">
-                  <button type="button" class="item-edit" data-edit="${b.id}" aria-expanded="${editingBlock === b.id}" aria-label="Edit ${esc(b.label)} on ${name}"><span>${esc(b.label)}, ${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}${b.type === 'sport' && b.intensity === 'hard' && !/game|race|match/i.test(b.label) ? ' <b class="tag">Game</b>' : ''}${blockTags(b)}</span></button>
+                  <button type="button" class="item-edit" data-edit="${b.id}" aria-expanded="${editingBlock === b.id}" aria-label="Edit ${esc(b.label)} on ${name}"><span>${esc(b.label)}, ${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}${b.type === 'sport' && b.intensity === 'hard' && !/game|race|match/i.test(b.label) ? ' <b class="tag">Game</b>' : ''}${b.type === 'sport' && b.intensity === 'easy' ? ' <b class="tag">Easy</b>' : ''}${blockTags(b)}</span></button>
                   <button type="button" data-del="${b.id}" aria-label="Remove ${esc(b.label)} on ${name}">×</button>
                 </span>`).join('') : '<span class="empty">Free</span>'}
             </div>
@@ -576,9 +577,9 @@ function renderWeek() {
         </fieldset>
         <fieldset id="intensity">
           <legend>How hard is it?</legend>
+          <p class="hint" style="margin:0 0 8px">Slotted keeps leg sessions away from games, a little away from training, and ignores easy sessions.</p>
           <div class="chips">
-            ${chip('intensity', 'light', 'Training', true, 'Moderate effort')}
-            ${chip('intensity', 'hard', 'Game or race', false, 'Full effort')}
+            ${Object.entries(SPORT_EFFORTS).map(([k, v]) => chip('intensity', k, v.label, k === 'light', v.sub)).join('')}
           </div>
         </fieldset>
         <fieldset>
@@ -1331,7 +1332,26 @@ function wireProposals(rerender) {
 // ---------- timetable changes in plain words ----------
 // The athlete types a change ("I finish school at 1:05 on Tuesdays"). Slotted reads it (or asks the AI),
 // checks it, shows exactly what would change, and only applies it when they say so.
-let avail = { text: '', busy: false, changes: null, bad: [], note: '', done: '' };
+let avail = { text: '', busy: false, changes: null, bad: [], note: '', done: '', photo: false };
+// Photos of a timetable waiting to be read: [{ media_type, data (base64), url (for the thumbnail) }]. Never saved.
+let availImgs = [];
+let availWeek = 'both'; // with Week A/B on: which week a photo shows ('A', 'B' or 'both')
+const availTemplates = () => (state.useAB && avail.photo && availWeek !== 'both' ? { templates: [availWeek] } : {});
+
+// Shrink a photo on the device before it is sent: longest side 1600px, JPEG.
+async function shrinkImage(file) {
+  const bmp = await createImageBitmap(file);
+  const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(bmp.width * scale));
+  c.height = Math.max(1, Math.round(bmp.height * scale));
+  const g = c.getContext('2d');
+  g.fillStyle = '#fff';
+  g.fillRect(0, 0, c.width, c.height);
+  g.drawImage(bmp, 0, 0, c.width, c.height);
+  const url = c.toDataURL('image/jpeg', 0.85);
+  return { media_type: 'image/jpeg', data: url.slice(url.indexOf(',') + 1), url };
+}
 const AVAIL_EXAMPLES = ['I finish school at 1:05 pm every Tuesday', 'I can’t train this Saturday', 'Basketball training Thursday 4–6 pm', 'My legs are still sore and I’m exhausted'];
 
 // This week's plan as it would be under another state (same rules as replan, nothing saved).
@@ -1370,20 +1390,22 @@ function availPreview() {
       ${avail.bad.length ? `<ul class="small">${avail.bad.map((b) => `<li>${esc(b)}</li>`).join('')}</ul>` : ''}
       <p class="small muted">Try naming the day and time, like “I finish school at 2:30 on Wednesdays”, or change it below in My week.</p></div>`;
   }
-  const next = applyChanges(state, good, ctx.key, ctx.tIdx);
+  const next = applyChanges(state, good, ctx.key, ctx.tIdx, availTemplates());
   const sim = simulatePlan(next, ctx.key);
   const diff = planDiff(ctx.entry.plan, sim.plan);
   // Locked or hand-placed sessions stay put; say so if a change now clashes with one.
   const clashes = sim.fixed.filter((s) => !ctx.isDone(s) && !ctx.isPast(s)
     && !freeGaps(weekBlocks(next, ctx.key), s.day, windowFor(next, ctx.key, s.day)).some(([a, z]) => s.start >= a && s.end <= z));
   return `<div class="avail-preview" role="status">
-    <span class="label">What will change</span>
+    <span class="label">${avail.photo ? `Read from your photo${state.useAB && availWeek !== 'both' ? `, for Week ${availWeek}` : ''}` : 'What will change'}</span>
+    ${avail.photo && avail.note ? `<p class="small muted">${esc(avail.note)}</p>` : ''}
     <ul class="propmoves">${good.map((c) => `<li>${esc(describeChange(c, ctx.key, ctx.tIdx))}${touchesFixed(c, state, ctx.key) ? ' <span class="badge">Fixed commitment</span>' : ''}</li>`).join('')}</ul>
     ${avail.bad.length ? `<p class="small muted">Left out: ${esc(avail.bad.join(' '))}</p>` : ''}
     <span class="label">This week’s plan</span>
     ${diff.length ? `<ul class="propmoves">${diff.map((d) => `<li>${esc(d)}</li>`).join('')}</ul>` : '<p class="small">No sessions need to move.</p>'}
     ${clashes.map((s) => `<p class="small note-warn">${esc(s.name)} is ${s.locked ? 'locked' : 'placed by hand'} on ${slotText(s)} and would clash. It stays put; move it yourself if you need to.</p>`).join('')}
     ${good.some((c) => c.op === 'feel') ? '<p class="small muted">Slotted will then check whether any sessions should move or get lighter, and ask you first.</p>' : ''}
+    ${avail.photo ? '<p class="small muted">Check the times against your timetable. You can fix any of them afterwards in My week.</p>' : ''}
     <div class="actions"><button type="button" class="primary" id="av-yes">Apply</button><button type="button" class="ghost" id="av-no">Cancel</button></div>
   </div>`;
 }
@@ -1396,7 +1418,14 @@ function availHtml() {
       <label class="sr" for="av-text">Describe the change</label>
       <textarea id="av-text" rows="2" maxlength="400" placeholder="I finish school at 1:05 pm on Tuesdays">${esc(avail.text)}</textarea>
       <div class="avail-ex">${AVAIL_EXAMPLES.map((x) => `<button type="button" class="ghost" data-avex="${esc(x)}">${esc(x)}</button>`).join('')}</div>
-      <div class="actions"><button type="submit" class="primary">Check it</button></div>
+      <div class="avail-photo">
+        <label class="btn" for="av-file">${icon('photo')}Add a photo of your timetable</label>
+        <input id="av-file" class="sr" type="file" accept="image/*" multiple>
+        ${availImgs.length ? `<div class="avail-thumbs">${availImgs.map((im, i) => `<span class="avail-thumb"><img src="${im.url}" alt="Timetable photo ${i + 1}"><button type="button" data-avimg="${i}" aria-label="Remove photo ${i + 1}">×</button></span>`).join('')}</div>` : ''}
+        ${availImgs.length && state.useAB ? `<div class="field"><label for="av-week">This photo shows</label><select id="av-week">${[['both', 'Every week (A and B)'], ['A', 'Week A'], ['B', 'Week B']].map(([v, t]) => `<option value="${v}" ${availWeek === v ? 'selected' : ''}>${t}</option>`).join('')}</select></div>` : ''}
+        <p class="hint" style="margin:0">${availImgs.length ? 'The photo is sent to the AI to be read and isn’t saved.' : 'A screenshot or clear photo works best. Crop out your name first if you like.'}</p>
+      </div>
+      <div class="actions"><button type="submit" class="primary">${availImgs.length ? 'Read my timetable' : 'Check it'}</button></div>
     </form>
     <div id="av-out">${availPreview()}</div>
   </section>`;
@@ -1412,10 +1441,26 @@ function wireAvail(rerender) {
     ev.preventDefault();
     const ctx = weekCtx();
     const said = text.value.trim();
-    if (!said) return;
-    avail = { text: said, busy: false, changes: null, bad: [], note: '', done: '' };
-    let { changes } = parseAvailability(said, { todayIdx: ctx.tIdx });
-    if (!changes.length) {
+    if (!said && !availImgs.length) return;
+    avail = { text: said, busy: false, changes: null, bad: [], note: '', done: '', photo: availImgs.length > 0 };
+    let changes;
+    if (avail.photo) {
+      avail.busy = true; rerender();
+      const res = await askTimetable(said, timetableContext(state, ctx.key, ctx.tIdx), { images: availImgs.map(({ media_type, data }) => ({ media_type, data })) });
+      avail.busy = false;
+      if (res.error) {
+        avail.changes = [];
+        avail.note = {
+          offline: 'You’re offline. Reading a photo needs an internet connection.',
+          rate_limited: 'You’ve used today’s AI questions. Try the photo again tomorrow, or add your commitments by hand below.',
+          image_rejected: 'That image couldn’t be used. Try a screenshot, or a smaller JPG or PNG.',
+        }[res.error] || 'The AI isn’t available right now, so the photo couldn’t be read. You can add your commitments by hand below.';
+        rerender(); return;
+      }
+      changes = photoChanges(res.changes, state, availTemplates());
+      avail.note = res.note || (changes.length ? '' : 'Nothing new was found in that photo. Your timetable may already match it.');
+    } else ({ changes } = parseAvailability(said, { todayIdx: ctx.tIdx }));
+    if (!avail.photo && !changes.length) {
       avail.busy = true; rerender();
       const res = await askTimetable(said, timetableContext(state, ctx.key, ctx.tIdx));
       avail.busy = false;
@@ -1440,15 +1485,34 @@ function wireAvail(rerender) {
   if (yes) yes.addEventListener('click', () => {
     const ctx = weekCtx();
     const list = avail.changes;
-    state = applyChanges(state, list, ctx.key, ctx.tIdx);
+    state = applyChanges(state, list, ctx.key, ctx.tIdx, availTemplates());
+    const fromPhoto = avail.photo;
     // Rebuild the weeks the changes touch (this week now; next week rebuilds itself when it starts).
     replan(ctx.key);
     commit();
-    avail = { text: '', busy: false, changes: null, bad: [], note: '', done: `Done: ${list.map((c) => describeChange(c, ctx.key, ctx.tIdx)).join('; ')}.` };
+    avail = { text: '', busy: false, changes: null, bad: [], note: '', photo: false, done: fromPhoto ? `Done: ${plural(list.length, 'change')} from your photo applied.` : `Done: ${list.map((c) => describeChange(c, ctx.key, ctx.tIdx)).join('; ')}.` };
+    if (fromPhoto) availImgs = [];
     rerender(); renderSideWeek();
   });
   const no = document.getElementById('av-no');
   if (no) no.addEventListener('click', () => { avail = { ...avail, changes: null, bad: [], note: '' }; rerender(); });
+  const file = document.getElementById('av-file');
+  if (file) file.addEventListener('change', async () => {
+    const picked = [...file.files].filter((f) => /^image\//.test(f.type)).slice(0, Math.max(0, PHOTO_MAX_IMAGES - availImgs.length));
+    if (file.files.length && !picked.length) toast(availImgs.length >= PHOTO_MAX_IMAGES ? `Up to ${PHOTO_MAX_IMAGES} photos at a time.` : 'Pick an image file.');
+    for (const f of picked) {
+      try { availImgs.push(await shrinkImage(f)); } catch { toast('Couldn’t read that image. Try a screenshot, JPG or PNG.'); }
+    }
+    avail = { ...avail, changes: null, bad: [], note: '', done: '' };
+    rerender();
+  });
+  app.querySelectorAll('[data-avimg]').forEach((b) => b.addEventListener('click', () => {
+    availImgs.splice(Number(b.dataset.avimg), 1);
+    avail = { ...avail, changes: null, bad: [], note: '' };
+    rerender();
+  }));
+  const wk = document.getElementById('av-week');
+  if (wk) wk.addEventListener('change', () => { availWeek = wk.value; avail = { ...avail, changes: null, bad: [], note: '' }; rerender(); });
   wireProposals(rerender);
 }
 
@@ -2042,7 +2106,7 @@ function renderHome() {
         const n = shownExercises(a.s, ctx.isShort(a.s)).length;
         return `<li>${when}<a class="what" href="${workoutHref(a.s)}"><b><i class="dot" style="background:var(--lime)"></i>${esc(a.s.name)}</b><small>${fmtTime(a.s.start)}, ${plural(n, 'exercise')}</small></a><span class="badge ${statusOf(ctx, a.s).cls}">${statusOf(ctx, a.s).label}</span></li>`;
       }
-      return `<li>${when}<span class="what"><b><i class="dot" style="background:var(--amber)"></i>${esc(a.b.label)}</b><small>${fmtTime(toMin(a.b.start))}${a.b.intensity === 'hard' ? ', game' : ''}</small></span><span class="badge sport">Sport</span></li>`;
+      return `<li>${when}<span class="what"><b><i class="dot" style="background:var(--amber)"></i>${esc(a.b.label)}</b><small>${fmtTime(toMin(a.b.start))}${a.b.intensity === 'hard' ? ', game' : a.b.intensity === 'easy' ? ', easy session' : ''}</small></span><span class="badge sport">Sport</span></li>`;
     }).join('')}</ul>` : '<p class="muted">Nothing else planned this week.</p>'}
   </section>`;
 
@@ -3267,7 +3331,7 @@ function coachContext() {
     : `Follows Slotted's suggested plan: ${SPLIT_NAMES[p.sessionsPerWeek]}.`);
   if ((state.restDays || []).length) lines.push(`Preferred rest days: ${state.restDays.map((d) => DAYS[d]).join(', ')}.`);
   const sport = blocksFor(key).filter((b) => b.type === 'sport');
-  if (sport.length) lines.push(`Sport this week: ${sport.map((b) => `${DAYS_SHORT[b.day]} ${b.label} (${b.intensity === 'hard' ? 'game' : 'training'})`).join(', ')}.`);
+  if (sport.length) lines.push(`Sport this week: ${sport.map((b) => `${DAYS_SHORT[b.day]} ${b.label} (${b.intensity === 'hard' ? 'game, full effort' : b.intensity === 'easy' ? 'easy session, minimal effort' : 'training, moderate effort'})`).join(', ')}.`);
   const other = blocksFor(key).filter((b) => b.type === 'work' || b.type === 'other');
   if (other.length) lines.push(`Other commitments: ${other.map((b) => `${DAYS_SHORT[b.day]} ${b.label} ${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}${b.flex ? ' (flexible)' : ''}${b.once ? ' (this week only)' : ''}`).join(', ')}.`);
   const school = blocksFor(key).filter((b) => b.type === 'school');

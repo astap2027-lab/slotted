@@ -180,3 +180,130 @@ test('flexible commitments give way only when the week is too full; fixed ones n
   const normal = planWithFlex(profile, roomy, win, { keys });
   assert.ok(normal.sessions.every((s) => !s.notes.some((n) => n.startsWith('Overlaps'))), 'with room, flexible ones are respected');
 });
+
+// ---------- effort levels ----------
+test('easy sport sessions do not push leg work away; games still do', async () => {
+  const profile = { goal: 'muscle', level: 'beginner', equipment: 'gym', sessionsPerWeek: 4, sessionLength: 60, timeOfDay: 'afternoon' };
+  const win = { start: '15:00', end: '21:00' };
+  // Sport on four days; only those four days are free for the gym.
+  const blocks = (intensity) => [
+    ...[0, 1, 2, 3].map((d) => ({ day: d, start: '19:00', end: '20:00', type: 'sport', label: 'Club', intensity })),
+    ...[4, 5, 6].map((d) => ({ day: d, start: '06:00', end: '22:00', type: 'other', label: 'Away' })),
+  ];
+  const legWarnings = (i) => planWeek(profile, blocks(i), win).warnings.filter((w) => w.kind === 'legs').length;
+  assert.ok(legWarnings('hard') > 0, 'games clash with leg days');
+  assert.equal(legWarnings('easy'), 0, 'easy sessions never count as hard sport');
+});
+
+test('the hardest sport on a day is the one the planner works around', () => {
+  const profile = { goal: 'muscle', level: 'beginner', equipment: 'gym', sessionsPerWeek: 2, sessionLength: 60, timeOfDay: 'afternoon' };
+  const blocks = [
+    { day: 1, start: '07:00', end: '07:30', type: 'sport', label: 'Stretch', intensity: 'easy' },
+    { day: 1, start: '18:00', end: '19:30', type: 'sport', label: 'Rugby game', intensity: 'hard' },
+    ...[0, 2, 3, 4, 5, 6].map((d) => ({ day: d, start: '06:00', end: '22:00', type: 'other', label: 'Away' })),
+  ];
+  const res = planWeek(profile, blocks, { start: '09:00', end: '17:00' });
+  assert.ok(res.sessions[0].notes.includes('Rugby game today'));
+});
+
+test('effort levels are stored, described and read from plain words', () => {
+  const out = applyChanges(base(), [{ op: 'add', days: [2], start: '16:00', end: '17:00', scope: 'always', block: { type: 'sport', label: 'Yoga', intensity: 'easy' } }], KEY);
+  assert.equal(out.blocks.A.find((b) => b.label === 'Yoga').intensity, 'easy');
+  const odd = applyChanges(base(), [{ op: 'add', days: [2], start: '16:00', end: '17:00', scope: 'always', block: { type: 'sport', label: 'X', intensity: 'extreme' } }], KEY);
+  assert.equal(odd.blocks.A.find((b) => b.label === 'X').intensity, 'light', 'unknown values fall back to training');
+  assert.equal(parse('I have recovery swimming on Monday from 6-7am')[0].block.intensity, 'easy');
+  assert.match(describeChange({ op: 'add', days: [2], start: '16:00', end: '17:00', scope: 'always', block: { type: 'sport', label: 'Yoga', intensity: 'easy' } }, KEY), /easy session/);
+});
+
+// ---------- timetable photo ----------
+test('a photo’s class periods become one School block per day, with each day’s own times', async () => {
+  const { photoChanges } = await import('../js/timetable.js');
+  const empty = { ...base(), blocks: { A: [], B: [] } };
+  const read = [
+    { op: 'add', days: [0], start: '08:30', end: '09:20', scope: 'always', block: { type: 'school', label: 'Maths' } },
+    { op: 'add', days: [0], start: '14:20', end: '15:10', scope: 'always', block: { type: 'school', label: 'English' } },
+    { op: 'add', days: [1], start: '08:30', end: '13:05', scope: 'always', block: { type: 'school', label: 'School' } },
+    { op: 'add', days: [3], start: '16:00', end: '18:00', scope: 'always', block: { type: 'sport', label: 'Basketball training', intensity: 'light' } },
+  ];
+  const out = photoChanges(read, empty);
+  assert.deepEqual(out.map((c) => [c.op, c.days[0], c.start, c.end, c.block.label]), [
+    ['add', 0, '08:30', '15:10', 'School'], ['add', 1, '08:30', '13:05', 'School'], ['add', 3, '16:00', '18:00', 'Basketball training'],
+  ]);
+  for (const c of out) assert.deepEqual(validateChange(c, empty, KEY), []);
+});
+
+test('a photo updates school that already exists instead of doubling it, and skips what is already there', async () => {
+  const { photoChanges } = await import('../js/timetable.js');
+  const st = base();
+  st.blocks.A.push({ id: 'bb', day: 3, start: '16:00', end: '18:00', type: 'sport', label: 'Basketball training', intensity: 'light' });
+  const out = photoChanges([
+    { op: 'add', days: [1], start: '08:30', end: '13:05', scope: 'always', block: { type: 'school', label: 'School' } },
+    { op: 'add', days: [2], start: '08:30', end: '15:10', scope: 'always', block: { type: 'school', label: 'School' } },
+    { op: 'add', days: [3], start: '16:00', end: '18:00', scope: 'always', block: { type: 'sport', label: 'basketball training' } },
+  ], st);
+  assert.deepEqual(out, [{ op: 'set_times', match: { type: 'school', day: 1 }, start: '08:30', end: '13:05', scope: 'always' }]);
+  const applied = applyChanges(st, out, KEY);
+  assert.equal(applied.blocks.A.filter((b) => b.day === 1 && b.type === 'school').length, 1);
+  assert.equal(applied.blocks.A.find((b) => b.day === 1).end, '13:05');
+});
+
+test('a photo never removes anything, and unreadable entries are dropped', async () => {
+  const { photoChanges } = await import('../js/timetable.js');
+  const out = photoChanges([
+    { op: 'remove', match: { type: 'school', day: 1 }, scope: 'always' },
+    { op: 'feel', sore: ['quads'], tired: true },
+    { op: 'skip_day', day: 2 },
+    { op: 'add', days: [9], start: '16:00', end: '17:00', block: { type: 'sport', label: 'X' } },
+    { op: 'add', days: [2], start: '4pm', end: '17:00', block: { type: 'sport', label: 'Y' } },
+  ], base());
+  assert.deepEqual(out, []);
+});
+
+test('with Week A and B, a photo can change just one week', async () => {
+  const { photoChanges } = await import('../js/timetable.js');
+  const ab = { ...base(), useAB: true, abAnchor: { week: KEY, type: 'A' }, blocks: { A: [school(0)], B: [school(0)] } };
+  const read = [{ op: 'add', days: [0], start: '08:30', end: '12:00', scope: 'always', block: { type: 'school', label: 'School' } }];
+  const out = applyChanges(ab, photoChanges(read, ab, { templates: ['B'] }), KEY, 0, { templates: ['B'] });
+  assert.equal(out.blocks.A[0].end, '15:10', 'Week A untouched');
+  assert.equal(out.blocks.B[0].end, '12:00');
+  const both = applyChanges(ab, photoChanges(read, ab), KEY);
+  assert.equal(both.blocks.A[0].end, '12:00'); assert.equal(both.blocks.B[0].end, '12:00');
+});
+
+test('the timetable endpoint passes photos to the model and refuses bad ones', async () => {
+  const { onRequestPost } = await import('../functions/api/timetable.js');
+  const req = (body) => new Request('https://slotted.pages.dev/api/timetable', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const env = { ANTHROPIC_API_KEY: 'k' };
+  let sent = null;
+  const many = Array.from({ length: 14 }, (_, i) => ({ op: 'add', days: [i % 5], start: '08:30', end: '15:10', scope: 'always', block: { type: 'school', label: 'School' } }));
+  globalThis.fetch = async (url, init) => {
+    sent = JSON.parse(init.body);
+    return new Response(JSON.stringify({ stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'timetable_changes', input: { changes: many, note: 'Could not read Friday period 6.' } }] }), { status: 200 });
+  };
+  const res = await onRequestPost({ request: req({ images: [{ media_type: 'image/jpeg', data: 'QUJD' }], context: 'Mon: free' }), env });
+  const out = await res.json();
+  assert.equal(out.changes.length, 14, 'photos may return more than the 10 changes a sentence can');
+  assert.equal(out.note, 'Could not read Friday period 6.');
+  const content = sent.messages[0].content;
+  assert.deepEqual(content[0], { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'QUJD' } });
+  assert.equal(content[1].type, 'text');
+  assert.match(sent.system, /ONE "add" with block type "school"/);
+  assert.equal(sent.tool_choice.name, 'timetable_changes');
+  assert.equal(sent.max_tokens, 4000);
+
+  sent = null;
+  for (const images of [
+    [{ media_type: 'application/pdf', data: 'QUJD' }],
+    [{ media_type: 'image/png', data: 'not base64!' }],
+    [{ media_type: 'image/png', data: 'A'.repeat(2000001) }],
+    [1, 2, 3].map(() => ({ media_type: 'image/png', data: 'QUJD' })),
+  ]) {
+    assert.equal((await onRequestPost({ request: req({ images }), env })).status, 400);
+  }
+  assert.equal(sent, null, 'rejected photos never reach the model');
+
+  globalThis.fetch = async () => new Response(JSON.stringify({ stop_reason: 'refusal', content: [] }), { status: 200 });
+  const refused = await (await onRequestPost({ request: req({ images: [{ media_type: 'image/png', data: 'QUJD' }] }), env })).json();
+  assert.deepEqual(refused.changes, []);
+  assert.match(refused.note, /couldn’t be read/);
+});

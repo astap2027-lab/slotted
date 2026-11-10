@@ -303,8 +303,9 @@ export function bestSlot(blocks, day, window, length, when = 'afternoon') {
 function sportOn(blocks, day) {
   const sport = blocks.filter((b) => b.day === day && b.type === 'sport');
   if (!sport.length) return null;
-  const hard = sport.find((b) => b.intensity === 'hard');
-  return hard || sport[0];
+  // The hardest thing on the day is what the planner works around: a game, then training, then an easy session.
+  const rank = (b) => (b.intensity === 'hard' ? 2 : b.intensity === 'easy' ? 0 : 1);
+  return sport.slice().sort((a, b) => rank(b) - rank(a))[0];
 }
 
 function permutations(days, n) {
@@ -329,6 +330,8 @@ const shares = (a, b) => sessionInfo(a).groups.some((g) => sessionInfo(b).groups
 function legPenalty(sessionKey, sport, dayBefore) {
   if (!sport) return 0;
   const legs = sessionInfo(sessionKey).legs;
+  // Easy sessions (stretching, skills, a walk-through) don't tire the legs, so they don't push leg work away.
+  if (sport.intensity === 'easy') return 0;
   const hard = sport.intensity === 'hard';
   const base = legs === 'heavy' ? (dayBefore ? 60 : 80) : legs === 'some' ? (dayBefore ? 25 : 40) : 0;
   return hard ? base : base / 4;
