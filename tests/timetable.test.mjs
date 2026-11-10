@@ -270,40 +270,124 @@ test('with Week A and B, a photo can change just one week', async () => {
   assert.equal(both.blocks.A[0].end, '12:00'); assert.equal(both.blocks.B[0].end, '12:00');
 });
 
-test('the timetable endpoint passes photos to the model and refuses bad ones', async () => {
+// A Monday as printed on a class timetable: period 1 is a free study period, period 6 is empty.
+const rows = (spec) => spec.map(([label, start, end, free]) => ({ label, start, end, free: !!free }));
+const MON = rows([['Study', '08:45', '09:35', true], ['Maths', '09:35', '10:25'], ['English', '10:25', '11:15'], ['Recess', '11:15', '11:35'], ['Science', '11:35', '12:25'], ['Lunch', '12:25', '13:05'], ['PE', '13:05', '13:55'], ['', '13:55', '14:45']]);
+
+test('school runs from the first class to the last, ignoring free periods at either end and breaks in the middle', async () => {
+  const { schoolDay } = await import('../js/timetable.js');
+  const d = schoolDay(MON);
+  assert.equal(d.start, '09:35'); assert.equal(d.end, '13:55');
+  assert.equal(d.classes, 4); assert.equal(d.firstClass, 'Maths'); assert.equal(d.lastClass, 'PE');
+  assert.equal(d.freeBefore, 1); assert.equal(d.freeAfter, 1);
+  assert.equal(schoolDay(rows([['Maths', '1:05', '1:55']])).start, '13:05', 'afternoon times without am/pm');
+  assert.equal(schoolDay(rows([['Maths', '9:00', '8:00'], ['X', 'abc', '10:00']])), null, 'unreadable rows are dropped');
+  assert.equal(schoolDay(rows([['Study', '09:00', '09:50', true]])), null, 'a day with no classes has no school');
+  assert.equal(schoolDay(rows([['Lunch', '12:00', '12:40'], ['Maths', '12:40', '13:30']])).start, '12:40', 'a break at the start isn’t a class');
+  assert.equal(schoolDay(rows([['Maths', '09:00', '15:30']])), null, 'a six hour “period” is a misread');
+});
+
+test('a photo plan has one school block per day with each day’s own times', async () => {
+  const { photoPlan, validateChange } = await import('../js/timetable.js');
+  const st = { ...base(), blocks: { A: [], B: [] } };
+  const result = { photos: [{ photo: 1, week: 'none', days: [
+    { day: 'Mon', periods: MON },
+    { day: 'Tue', periods: rows([['Maths', '08:45', '09:35'], ['English', '09:35', '10:25'], ['Study', '10:25', '11:15', true]]) },
+  ] }], other: [{ photo: 1, day: 'Thu', label: 'Basketball', type: 'sport', intensity: 'light', start: '16:00', end: '18:00' }], unreadable: ['Wednesday period 4'] };
+  const plan = photoPlan(result, st);
+  assert.equal(plan.groups.length, 1); assert.equal(plan.groups[0].week, 'all');
+  assert.deepEqual(plan.groups[0].changes.map((c) => [c.days[0], c.start, c.end, c.block.label]), [
+    [0, '09:35', '13:55', 'School'], [1, '08:45', '10:25', 'School'], [3, '16:00', '18:00', 'Basketball'],
+  ]);
+  for (const c of plan.groups[0].changes) assert.deepEqual(validateChange(c, st, KEY), []);
+  assert.deepEqual(plan.unreadable, ['Wednesday period 4']);
+});
+
+test('with Week A and B, two photos become Week A and Week B, labels win, and they can be swapped', async () => {
+  const { photoPlan } = await import('../js/timetable.js');
+  const ab = { ...base(), useAB: true, abAnchor: { week: KEY, type: 'A' }, blocks: { A: [], B: [] } };
+  const day = (end) => [{ day: 'Mon', periods: rows([['Maths', '08:45', end]]) }];
+  const two = (la, lb) => ({ photos: [{ photo: 1, week: la, days: day('09:35') }, { photo: 2, week: lb, days: day('10:25') }] });
+  const ends = (p) => Object.fromEntries(p.groups.map((g) => [g.week, g.changes[0].end]));
+  assert.deepEqual(ends(photoPlan(two('none', 'none'), ab)), { A: '09:35', B: '10:25' }, 'photo 1 is A, photo 2 is B');
+  assert.deepEqual(ends(photoPlan(two('B', 'A'), ab)), { A: '10:25', B: '09:35' }, 'printed labels win');
+  assert.deepEqual(ends(photoPlan(two('none', 'none'), ab, { swap: true })), { A: '10:25', B: '09:35' });
+  assert.deepEqual(ends(photoPlan(two('A', 'none'), ab)), { A: '09:35', B: '10:25' }, 'one label places the other photo');
+  const one = { photos: [{ photo: 1, week: 'none', days: day('09:35') }] };
+  assert.deepEqual(photoPlan(one, ab, { choice: 'B' }).groups.map((g) => g.week), ['B']);
+  assert.deepEqual(photoPlan(one, ab, { choice: 'both' }).groups.map((g) => g.week), ['all']);
+  assert.equal(photoPlan(two('none', 'none'), { ...ab, useAB: false }).notes.length, 1, 'different weeks without A/B on: say so');
+});
+
+test('the photo plan applies each week to its own timetable and never touches the other', async () => {
+  const { photoPlan, applyChanges } = await import('../js/timetable.js');
+  const ab = { ...base(), useAB: true, abAnchor: { week: KEY, type: 'A' }, blocks: { A: [school(0)], B: [school(0)] } };
+  const day = (last, end) => [{ day: 'Mon', periods: rows([['Maths', '08:30', '09:20'], ['PE', last, end]]) }];
+  const plan = photoPlan({ photos: [{ photo: 1, week: 'A', days: day('11:10', '12:00') }, { photo: 2, week: 'B', days: day('12:40', '13:30') }] }, ab);
+  const out = plan.groups.reduce((acc, g) => applyChanges(acc, g.changes, KEY, 0, { templates: g.templates }), ab);
+  assert.equal(out.blocks.A.length, 1); assert.equal(out.blocks.A[0].end, '12:00');
+  assert.equal(out.blocks.B.length, 1); assert.equal(out.blocks.B[0].end, '13:30');
+});
+
+test('garbage from the model never breaks the plan', async () => {
+  const { photoPlan } = await import('../js/timetable.js');
+  for (const r of [null, {}, { photos: 'x' }, { photos: [null, { days: [{ day: 'Funday', periods: 5 }] }], other: [{}, null], unreadable: [1, '  '] }]) {
+    const plan = photoPlan(r, base());
+    assert.deepEqual(plan.groups, []); assert.deepEqual(plan.unreadable, []);
+  }
+});
+
+test('the timetable endpoint reads photos with the stronger model, falls back, and refuses bad ones', async () => {
   const { onRequestPost } = await import('../functions/api/timetable.js');
   const req = (body) => new Request('https://slotted.pages.dev/api/timetable', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const env = { ANTHROPIC_API_KEY: 'k' };
-  let sent = null;
-  const many = Array.from({ length: 14 }, (_, i) => ({ op: 'add', days: [i % 5], start: '08:30', end: '15:10', scope: 'always', block: { type: 'school', label: 'School' } }));
-  globalThis.fetch = async (url, init) => {
-    sent = JSON.parse(init.body);
-    return new Response(JSON.stringify({ stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'timetable_changes', input: { changes: many, note: 'Could not read Friday period 6.' } }] }), { status: 200 });
-  };
-  const res = await onRequestPost({ request: req({ images: [{ media_type: 'image/jpeg', data: 'QUJD' }], context: 'Mon: free' }), env });
-  const out = await res.json();
-  assert.equal(out.changes.length, 14, 'photos may return more than the 10 changes a sentence can');
-  assert.equal(out.note, 'Could not read Friday period 6.');
-  const content = sent.messages[0].content;
-  assert.deepEqual(content[0], { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'QUJD' } });
-  assert.equal(content[1].type, 'text');
-  assert.match(sent.system, /ONE "add" with block type "school"/);
-  assert.equal(sent.tool_choice.name, 'timetable_changes');
-  assert.equal(sent.max_tokens, 4000);
+  const photo = { photos: [{ photo: 1, week: 'A', days: [] }], other: [], unreadable: [] };
+  const calls = [];
+  const reply = (input) => new Response(JSON.stringify({ stop_reason: 'tool_use', content: [{ type: 'thinking', thinking: '' }, ...(input ? [{ type: 'tool_use', name: 'timetable_photo', input }] : [{ type: 'text', text: 'hm' }])] }), { status: 200 });
+  globalThis.fetch = async (url, init) => { calls.push(JSON.parse(init.body)); return reply(photo); };
+  const images = [{ media_type: 'image/jpeg', data: 'QUJD' }, { media_type: 'image/png', data: 'REVG' }];
+  const res = await onRequestPost({ request: req({ images, context: 'Mon: free' }), env });
+  assert.deepEqual(await res.json(), { photo });
+  assert.equal(calls.length, 1);
+  const sent = calls[0];
+  assert.equal(sent.model, 'claude-sonnet-5-5');
+  assert.deepEqual(sent.tool_choice, { type: 'auto' }, 'Sonnet 5.5 cannot be forced to call a tool');
+  assert.equal(sent.thinking, undefined, 'Sonnet 5.5 cannot have thinking disabled');
+  assert.equal(sent.tools[0].name, 'timetable_photo'); assert.equal(sent.tools[0].strict, true);
+  assert.equal(sent.tools[0].input_schema.additionalProperties, false);
+  const c = sent.messages[0].content;
+  assert.equal(c.filter((b) => b.type === 'image').length, 2);
+  assert.deepEqual(c[1], { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'QUJD' } });
+  assert.match(sent.system, /transcribing, not summarising/);
+  assert.match(c[c.length - 1].text, /timetable_photo tool/);
 
-  sent = null;
-  for (const images of [
+  // The stronger model doesn't answer with the tool: the coach's model gets one try.
+  calls.length = 0;
+  globalThis.fetch = async (url, init) => { const b = JSON.parse(init.body); calls.push(b); return reply(b.model === 'claude-sonnet-5-5' ? null : photo); };
+  assert.deepEqual(await (await onRequestPost({ request: req({ images }), env })).json(), { photo });
+  assert.deepEqual(calls.map((b) => b.model), ['claude-sonnet-5-5', 'claude-haiku-5-5']);
+  assert.deepEqual(calls[1].tool_choice, { type: 'tool', name: 'timetable_photo' });
+  assert.deepEqual(calls[1].thinking, { type: 'disabled' });
+
+  // Both fail: a plain message, not a crash. Upstream trouble is reported as such.
+  globalThis.fetch = async () => reply(null);
+  const none = await (await onRequestPost({ request: req({ images }), env })).json();
+  assert.equal(none.photo, null); assert.match(none.note, /couldn’t be read/);
+  globalThis.fetch = async () => new Response('{}', { status: 500 });
+  assert.equal((await onRequestPost({ request: req({ images }), env })).status, 502);
+
+  // Typed sentences are unchanged: the coach's model with a forced tool.
+  calls.length = 0;
+  globalThis.fetch = async (url, init) => { calls.push(JSON.parse(init.body)); return new Response(JSON.stringify({ content: [{ type: 'tool_use', name: 'timetable_changes', input: { changes: [{ op: 'skip_day', day: 5, week: 'this' }] } }] }), { status: 200 }); };
+  assert.deepEqual((await (await onRequestPost({ request: req({ text: 'no gym saturday' }), env })).json()).changes, [{ op: 'skip_day', day: 5, week: 'this' }]);
+  assert.equal(calls[0].model, 'claude-haiku-5-5'); assert.deepEqual(calls[0].tool_choice, { type: 'tool', name: 'timetable_changes' });
+
+  calls.length = 0;
+  for (const bad of [
     [{ media_type: 'application/pdf', data: 'QUJD' }],
     [{ media_type: 'image/png', data: 'not base64!' }],
-    [{ media_type: 'image/png', data: 'A'.repeat(2000001) }],
+    [{ media_type: 'image/png', data: 'A'.repeat(4000001) }],
     [1, 2, 3].map(() => ({ media_type: 'image/png', data: 'QUJD' })),
-  ]) {
-    assert.equal((await onRequestPost({ request: req({ images }), env })).status, 400);
-  }
-  assert.equal(sent, null, 'rejected photos never reach the model');
-
-  globalThis.fetch = async () => new Response(JSON.stringify({ stop_reason: 'refusal', content: [] }), { status: 200 });
-  const refused = await (await onRequestPost({ request: req({ images: [{ media_type: 'image/png', data: 'QUJD' }] }), env })).json();
-  assert.deepEqual(refused.changes, []);
-  assert.match(refused.note, /couldn’t be read/);
+  ]) assert.equal((await onRequestPost({ request: req({ images: bad }), env })).status, 400);
+  assert.equal(calls.length, 0, 'rejected photos never reach the model');
 });
