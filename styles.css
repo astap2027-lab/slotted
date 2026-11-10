@@ -760,7 +760,7 @@ body.focus .rest { bottom: calc(86px + env(safe-area-inset-bottom, 0px)); }
 .wtools { display: flex; gap: 2px; align-items: center; flex-wrap: wrap; }
 .wtools button:disabled { opacity: 0.35; cursor: default; }
 .exgrid { display: grid; gap: 6px; }
-.exgrid-head, .exline { display: grid; grid-template-columns: minmax(0, 2.4fr) 68px minmax(0, 1fr) minmax(0, 1.1fr) 40px; gap: 6px; align-items: center; }
+.exgrid-head, .exline { display: grid; grid-template-columns: minmax(0, 2.2fr) 64px minmax(0, 1fr) 84px minmax(0, 1.1fr) 40px; gap: 6px; align-items: center; }
 .exgrid-head span { font-size: 13px; color: var(--text-3); font-weight: 500; }
 .exline input, .exline select { min-height: 42px; padding: 8px 10px; }
 .exline .ghost { min-height: 42px; padding: 0; font-size: 20px; }
@@ -770,6 +770,7 @@ body.focus .rest { bottom: calc(86px + env(safe-area-inset-bottom, 0px)); }
   .exline { grid-template-columns: 1fr 1fr 40px; padding: 8px 0; border-top: 1px solid var(--line); }
   .exline input[data-efield=name] { grid-column: 1 / -1; }
   .exline select { grid-column: 1 / 3; }
+  .exline input[data-efield=startKg], .exline .exline-gap { grid-column: 1 / 3; }
   .exline .ghost { grid-column: 3; grid-row: 2 / 4; }
 }
 
@@ -929,3 +930,9 @@ td .effort-opts { max-width: 300px; }
 .photo-days { display: grid; gap: 6px; padding: 0; margin: 0; list-style: none; }
 .photo-days li { display: grid; gap: 1px; font-size: 14.5px; }
 .photo-days small { color: var(--text-2); font-size: 13px; }
+
+/* ---------- asking for the weight ---------- */
+.xneed { color: var(--amber-text); font-size: 14.5px; font-weight: 600; margin: 0; }
+.xneed[hidden] { display: none; }
+.set input.need { border-color: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft); }
+.xnote { margin: 0; }

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { findExercise, setMoveResolver } from '../js/exercises.js';
 import { moveName } from '../js/scheduler.js';
-import { fieldsFor, weightLabel, normSet, newBest, bestText, suggestSet, setsText, chartValue, chartCaption } from '../js/tracking.js';
+import { fieldsFor, weightLabel, normSet, newBest, bestText, suggestSet, setsText, chartValue, chartCaption, weightNeeded, typedWeight, weightSoFar } from '../js/tracking.js';
 import { collectHistory, summarise } from '../js/progress.js';
 
 const ex = (n) => findExercise(n);
@@ -97,4 +97,32 @@ test('progress charts plot the right number for each type', () => {
   assert.equal(assisted[0].kind, 'reps', 'assisted work is judged on reps, not assistance');
   assert.equal(assisted[1].pr, true);
   assert.equal(summarise(assisted).bestE1rm, null);
+});
+
+test('weighted exercises ask for a weight, bodyweight ones do not', () => {
+  const need = (n) => { const e = ex(n); return weightNeeded(e.track || 'weight_reps', e.load); };
+  assert.equal(weightNeeded('weight_reps', 'total'), true, 'barbell');
+  assert.equal(weightNeeded('weight_reps', 'pair'), true, 'dumbbells');
+  assert.equal(need('EZ-bar curl'), true, 'the EZ-bar curl asks for its weight');
+  assert.equal(weightNeeded('weight_reps', 'added'), false, 'weighted pull-up: bodyweight is fine');
+  assert.equal(weightNeeded('weight_reps', 'assisted'), false);
+  assert.equal(weightNeeded('reps', 'none'), false, 'push-ups have no weight box');
+  assert.equal(weightNeeded('duration', 'none'), false, 'plank has no weight box');
+});
+
+test('a typed weight: 0 is a real answer, empty and text are not', () => {
+  assert.equal(typedWeight('0'), 0);
+  assert.equal(typedWeight('20'), 20);
+  assert.equal(typedWeight('22.5'), 22.5);
+  assert.equal(typedWeight(''), '');
+  assert.equal(typedWeight('kg'), '', 'a unit label placeholder is not a weight');
+  assert.equal(typedWeight(undefined), '');
+});
+
+test('later sets start from the weight already used today', () => {
+  assert.equal(weightSoFar([]), '');
+  assert.equal(weightSoFar([{ reps: 10 }]), '', 'a set with no weight does not count');
+  assert.equal(weightSoFar([{ reps: 10 }, { kg: 20, reps: 10 }, { kg: 25 }]), 20);
+  assert.equal(weightSoFar([{ kg: 0, reps: 10 }]), 0, '0 is a weight someone chose');
+  assert.equal(weightSoFar(undefined), '');
 });

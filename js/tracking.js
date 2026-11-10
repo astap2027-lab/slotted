@@ -134,3 +134,17 @@ export function chartCaption(kind, session, units = 'kg') {
   return 'Best set, reps';
 }
 export const kindUnit = (kind, units = 'kg') => (kind === 'kg' ? unitLabel(units) : kind === 'sec' ? 's' : kind === 'm' ? 'm' : 'reps');
+
+// ---------- asking for the weight ----------
+// Weighted exercises need a weight before a set can be ticked (0 is fine and means "none"). Bodyweight work with
+// optional extra weight or assistance doesn't ask: no weight just means bodyweight.
+export const weightNeeded = (track, load) => hasWeight(track) && !['added', 'assisted', 'none'].includes(load);
+
+// A weight typed in a box, in the user's unit, as a number; '' when nothing usable was typed.
+export const typedWeight = (v) => (v === '' || v === null || v === undefined || !Number.isFinite(Number(v)) ? '' : Number(v));
+
+// The weight (kg, as stored) an exercise's other sets are using today: the first set that has one.
+export function weightSoFar(sets) {
+  const s = (sets || []).find((x) => x && x.kg !== undefined && x.kg !== '' && x.kg !== null && Number.isFinite(Number(x.kg)));
+  return s ? Number(s.kg) : '';
+}
