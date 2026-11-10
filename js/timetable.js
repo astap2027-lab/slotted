@@ -399,23 +399,56 @@ export async function askTimetable(text, context, { signal, images = [] } = {}) 
   } catch { return { error: 'offline' }; }
   if (res.status === 429) return { error: 'rate_limited' };
   if (res.status === 400 || res.status === 413) return { error: 'image_rejected' };
+  if (res.status === 504 || res.status === 524) return { error: 'timeout' };
   if (!res.ok) return { error: [404, 405, 501, 503].includes(res.status) ? 'not_set_up' : 'upstream_error' };
   const data = await res.json().catch(() => ({}));
   if (images.length) return { photo: data.photo && typeof data.photo === 'object' ? data.photo : null, note: String(data.note || '').slice(0, 200) };
   return { changes: cleanChanges(data.changes), note: String(data.note || '').slice(0, 300) };
 }
 
-// ---------- a photo of a timetable ----------
+export const PHOTO_TIMEOUT_MS = 90000; // the page stops waiting for one photo after this
+// Read photos one request each, all at once: each is half the work and they run side by side.
+// onProgress(done, total) is called as each finishes. Returns { photo, note } or { error }.
+export async function askTimetablePhotos(text, context, images, { onProgress = () => {}, timeoutMs = PHOTO_TIMEOUT_MS } = {}) {
+  let done = 0;
+  onProgress(0, images.length);
+  const results = await Promise.all(images.map(async (image) => {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    let r;
+    try { r = await askTimetable(text, context, { images: [image], signal: ctl.signal }); } finally { clearTimeout(timer); }
+    if (ctl.signal.aborted) r = { error: 'timeout' };
+    onProgress(++done, images.length);
+    return r;
+  }));
+  const photos = [];
+  const other = [];
+  const unreadable = [];
+  let note = '';
+  results.forEach((r, i) => {
+    const n = i + 1;
+    if (r.error || !r.photo) { unreadable.push(`Photo ${n} couldn’t be read`); if (!r.error && r.note) note = r.note; return; }
+    for (const p of Array.isArray(r.photo.photos) ? r.photo.photos.slice(0, 1) : []) photos.push({ ...p, photo: n });
+    for (const o of Array.isArray(r.photo.other) ? r.photo.other : []) other.push({ ...o, photo: n });
+    for (const u of Array.isArray(r.photo.unreadable) ? r.photo.unreadable : []) if (typeof u === 'string') unreadable.push(`Photo ${n}: ${u}`);
+  });
+  if (!photos.length) {
+    const err = results.map((r) => r.error).find(Boolean);
+    return err ? { error: err } : { photo: null, note: note || 'That couldn’t be read. Try a clear screenshot of your timetable.' };
+  }
+  return { photo: { photos, other, unreadable }, note };
+}
+
 export const PHOTO_MAX_CHANGES = 40;
 export const PHOTO_MAX_IMAGES = 2;
 export const PHOTO_PROMPT = `You are given one or two photos or screenshots of a student's timetable. Copy what each one shows by calling the timetable_photo tool. You are transcribing, not summarising: another program works out when the student is busy.
 
 For each photo, in the order given (photo 1 first):
-- "week": "A" or "B" only if the photo itself is labelled that way (for example "Week A", "Wk B", "Week 1" = A, "Week 2" = B). Otherwise "none".
-- "days": every day column that has entries. For each day, list EVERY row of that day from top to bottom as a period, including recess, lunch and empty rows.
+- "week": "A" or "B" only if the photo itself is labelled that way: a heading such as "Week A" or "Wk B", or day headings that end in the letter, such as "MonA 9/11" or "TueB 3/11" ("Week 1" = A, "Week 2" = B). Otherwise "none".
+- "days": every day column that has entries. For each day, list EVERY row of that day from top to bottom as a period, including recess, lunch and empty rows. Rows may be numbered (0, 1, 2 ...) or named (WG, Recess, Lunch); one row can hold two cells side by side (for example an event beside a class): list each as its own period with the same times.
   - "label": the text in the cell (subject or activity). Use "Recess" or "Lunch" for breaks. Use "" for an empty cell.
   - "start" and "end": that row's times in 24-hour HH:MM. Times are usually printed once in a column at the side, or inside each cell. Read them from the image; afternoon times such as 1:05 are 13:05.
-  - "free": true when the student has no class in that row: an empty cell, or a cell that says free, spare, study, private study or similar. Otherwise false.
+  - "free": true when the student has no class in that row: an empty cell, or a cell that says free, spare, study, private study or similar. Otherwise false. A pastoral or roll row such as "WG" (wellbeing group) or "Form" is attendance, so it is not free.
 - Read each day column separately, straight down. Do not copy one day's entries into another day. If a cell spans two rows, list both rows with the same label.
 
 "other": sport, training, clubs or work shifts shown outside class time, each with its photo number, day, label, type, times and, for sport, intensity ("hard" for games, matches and races, "easy" for stretching or recovery, otherwise "light"; "none" when it isn't sport).
@@ -456,6 +489,7 @@ function phTime(v) {
   return `${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}`;
 }
 const PH_BREAK = /^(recess|lunch|break|morning tea|interval)\b/i;
+const PH_FREE = /^(study|private study|supervised study|free|spare|free period)\b/i;
 
 // One day's rows -> when school starts and finishes. Free rows at the start or end shorten the day;
 // breaks and free rows in the middle don't matter.
@@ -466,7 +500,8 @@ export function schoolDay(periods) {
     if (!start || !end || toMin(end) <= toMin(start) || toMin(end) - toMin(start) > 240) return null;
     const label = String((p && p.label) || '').trim().slice(0, 40);
     const isBreak = PH_BREAK.test(label);
-    return { label, start, end, isBreak, free: !isBreak && (!!p.free || !label) };
+    // A "Study" row is a free period even if the AI marked it as a class.
+    return { label, start, end, isBreak, free: !isBreak && (!!p.free || !label || PH_FREE.test(label)) };
   }).filter(Boolean).sort((a, b) => toMin(a.start) - toMin(b.start));
   const classes = rows.filter((r) => !r.free && !r.isBreak);
   if (!classes.length) return null;
