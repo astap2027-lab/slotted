@@ -121,3 +121,22 @@ test('the coach is told to use next week and never invent times, and the safety 
   assert.match(COACH_INSTRUCTIONS, /physio or GP/);
   assert.match(COACH_INSTRUCTIONS, /calorie targets/);
 });
+
+import { windowLines } from '../js/coach.js';
+
+test('free windows list each day’s gaps long enough for a session', () => {
+  const days = [[[360, 555], [945, 1260]], [[420, 465]], [], [[360, 400]], [], [[360, 1260]], [[360, 1260]]];
+  const lines = windowLines(days, 60);
+  assert.equal(lines.length, 7);
+  assert.equal(lines[0], 'Mon: 6am to 9:15am, 3:45pm to 9pm');
+  assert.equal(lines[1], 'Tue: nothing long enough');
+  assert.equal(lines[2], 'Wed: nothing long enough');
+  assert.equal(lines[5], 'Sat: 6am to 9pm');
+});
+
+test('commitments without a name are not called "something", and the instructions ask for morning options', () => {
+  const text = commitmentLines([{ day: 0, start: '15:30', end: '17:00', type: 'other', label: '' }], '').join(' ');
+  assert.match(text, /Other/);
+  assert.match(COACH_INSTRUCTIONS, /Free windows/);
+  assert.match(COACH_INSTRUCTIONS, /free morning/);
+});
