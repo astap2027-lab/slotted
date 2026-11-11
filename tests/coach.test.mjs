@@ -140,3 +140,10 @@ test('commitments without a name are not called "something", and the instruction
   assert.match(COACH_INSTRUCTIONS, /Free windows/);
   assert.match(COACH_INSTRUCTIONS, /free morning/);
 });
+
+test('the coach is told about waiting questions, cannot apply them, and may ask one question', () => {
+  assert.match(COACH_INSTRUCTIONS, /Questions and suggested changes the app is showing/);
+  assert.match(COACH_INSTRUCTIONS, /tap Yes/);
+  assert.match(COACH_INSTRUCTIONS, /at most one short question/);
+  assert.match(COACH_INSTRUCTIONS, /Never say you have moved or changed anything/);
+});

@@ -1,6 +1,6 @@
 import {
   DAYS, DAYS_SHORT, planWeek, weekKey, weekType, keyToDate, fmtTime, toMin, toHHMM, streakInfo, SPLIT_NAMES, SPLITS, SESSIONS,
-  busyCount, sessionKeysFor, moveName, weeksBetween, addWeeks, sessionInfo, GROUPS, exercisesFor, freeGaps, bestSlot,
+  busyCount, sessionKeysFor, morningSlot, moveName, weeksBetween, addWeeks, sessionInfo, GROUPS, exercisesFor, freeGaps, bestSlot,
   exerciseLibrary, setCustomRoutine, rememberExerciseNames, customExerciseNames, routineKeys, exerciseKey,
 } from './scheduler.js';
 import { collectHistory, summarise } from './progress.js';
@@ -10,7 +10,7 @@ import {
   weekBlocks, windowFor, dayWindows, parseAvailability, validateChange, applyChanges, describeChange, touchesFixed,
   timetableContext, askTimetable, askTimetablePhotos, BLOCK_TYPES, planWithFlex, appliesTo, SPORT_EFFORTS, sportEffort, photoPlan, PHOTO_MAX_IMAGES,
 } from './timetable.js';
-import { proposeChanges, applyProposal } from './adjust.js';
+import { proposeChanges, proposeMornings, applyProposal } from './adjust.js';
 import { load, save, exportJSON, importJSON, reset, defaultState } from './store.js';
 import { mergeStates, forUpload } from './sync.js';
 import { computeFreshness, freshnessLevel, LEVEL_LABELS, musclesFor, MUSCLES, PARTS, EFFORT, MAP_GROUPS } from './freshness.js';
@@ -230,6 +230,7 @@ function readProfile(form) {
     sessionsPerWeek: Number(f.get('sessionsPerWeek')),
     sessionLength: Number(f.get('sessionLength')),
     timeOfDay: f.get('timeOfDay') || 'afternoon',
+    ...(state.profile.morningAsked ? { morningAsked: state.profile.morningAsked } : {}),
   };
   state.name = String(f.get('name') || '').trim().slice(0, 40);
   state.restDays = f.getAll('restDays').map(Number);
@@ -1307,12 +1308,44 @@ function weekProposals(ctx, { withStrava = true } = {}) {
     return sl && !sl.short ? { start: sl.start, end: sl.end } : null;
   };
   const fits = (d, a, z) => freeGaps(blocksFor(ctx.key), d, winFor(ctx.key, d)).some(([x, y]) => a >= x && z <= y);
-  return proposeChanges({
+  const base = proposeChanges({
     sessions: e.plan, todayIdx: ctx.tIdx, nowMin: ctx.now, isDone: ctx.isDone, mainGroups, freshAt,
     labels: Object.fromEntries(MUSCLES.map((m) => [m.id, m.label])),
     readiness: readiness(e.checkins && e.checkins[ctx.tIdx]), report: e.reports && e.reports[ctx.tIdx],
     freeSlot, fits, dismissed: e.dismissed || [],
   });
+  // Questions about free mornings: move an after-school session to a free morning, or plan mornings from now on.
+  const used = new Set(base.proposals.flatMap((p) => p.keys));
+  const heavyLegsOnGameDay = (s) => sessionInfo(s.key).legs !== 'none' && blocksFor(ctx.key).some((b) => b.day === s.day && b.type === 'sport' && b.intensity === 'hard');
+  const mornings = proposeMornings({
+    sessions: e.plan.filter((x) => !used.has(x.key)), todayIdx: ctx.tIdx, nowMin: ctx.now, isDone: ctx.isDone,
+    morningSlot: (day, len) => morningSlot(blocksFor(ctx.key), day, winFor(ctx.key, day), len),
+    skip: (x) => skip.includes(x.day) || heavyLegsOnGameDay(x), dismissed: e.dismissed || [],
+  }).proposals;
+  const pref = prefQuestion(ctx);
+  return { proposals: [...base.proposals, ...mornings, ...(pref ? [pref] : [])], notes: base.notes };
+}
+
+// Asked once: should Slotted plan sessions before school on days when the morning is free? Yes switches Preferred time to Mix.
+function prefQuestion(ctx) {
+  const p = state.profile;
+  if (p.morningAsked || ['mix', 'morning'].includes(p.timeOfDay)) return null;
+  const len = Number(p.sessionLength) || 60;
+  const found = new Map();
+  for (const wk of [ctx.key, addWeeks(ctx.key, 1)]) {
+    const blocks = weekBlocks(state, wk);
+    for (let d = 0; d < 7; d++) {
+      const m = morningSlot(blocks, d, windowFor(state, wk, d), len);
+      if (m && m.first && !found.has(d)) found.set(d, m.first.start);
+    }
+  }
+  if (!found.size) return null;
+  const days = [...found.entries()].sort((a, b) => a[0] - b[0]).map(([d, t]) => `${DAYS[d]} (starts ${fmtTime(t)})`).join(', ').replace(/, ([^,]*)$/, ' and $1');
+  return {
+    id: 'pref:mix', kind: 'pref', keys: [], moves: [],
+    title: 'Plan sessions before school when your morning is free?',
+    reason: `You have free time before your first commitment on ${days}. Should Slotted plan sessions in those mornings and after school on other days? You can change this any time in Settings.`,
+  };
 }
 
 const slotText = (x) => `${DAYS_SHORT[x.day]} ${fmtTime(x.start)}`;
@@ -1325,11 +1358,26 @@ function proposalsCard(ctx) {
       <b>${esc(p.title)}</b>
       <p class="small">${esc(p.reason)}</p>
       ${p.moves.length ? `<ul class="propmoves">${p.moves.map((m) => `<li><b>${esc(m.name)}</b> moves from ${slotText(m.from)} to ${slotText(m.to)}</li>`).join('')}</ul>` : ''}
-      <div class="actions"><button type="button" class="primary" data-propyes="${esc(p.id)}">Accept</button><button type="button" class="ghost" data-propno="${esc(p.id)}">No thanks</button></div>
+      <div class="actions"><button type="button" class="primary" data-propyes="${esc(p.id)}">${p.kind === 'morning' ? 'Yes, move it' : p.kind === 'pref' ? 'Yes, plan mornings' : 'Accept'}</button><button type="button" class="ghost" data-propno="${esc(p.id)}">No thanks</button></div>
     </div>`).join('')}
     ${notes.map((n) => `<p class="small muted">${esc(n)}</p>`).join('')}
-    <p class="rec-note">Based on estimates from your logged training and check-in, not a medical measurement. Commitments are never moved.</p>
+    ${proposals.some((p) => !['morning', 'pref'].includes(p.kind)) ? '<p class="rec-note">Based on estimates from your logged training and check-in, not a medical measurement. Commitments are never moved.</p>' : '<p class="rec-note">Commitments are never moved.</p>'}
   </section>`;
+}
+
+// The coach's own questions (free mornings), shown above the chat. Same answers as the Suggested changes card.
+function coachAsks(ctx) {
+  const asks = weekProposals(ctx).proposals.filter((p) => ['morning', 'pref'].includes(p.kind));
+  if (!asks.length) return '';
+  return `<div class="coach-asks" aria-label="Questions from the coach">
+    <span class="label">The coach asks</span>
+    ${asks.map((p) => `<div class="proposal">
+      <b>${esc(p.title)}</b>
+      <p class="small">${esc(p.reason)}</p>
+      <div class="actions"><button type="button" class="primary" data-propyes="${esc(p.id)}">${p.kind === 'pref' ? 'Yes, plan mornings' : 'Yes, move it'}</button><button type="button" class="ghost" data-propno="${esc(p.id)}">No thanks</button></div>
+    </div>`).join('')}
+    <p class="small muted">Nothing changes unless you say yes.</p>
+  </div>`;
 }
 
 function wireProposals(rerender) {
@@ -1338,6 +1386,12 @@ function wireProposals(rerender) {
   app.querySelectorAll('[data-propyes]').forEach((b) => b.addEventListener('click', () => {
     const p = weekProposals(ctx).proposals.find((x) => x.id === b.dataset.propyes);
     if (!p) { rerender(); return; }
+    if (p.kind === 'pref') {
+      state.profile.timeOfDay = 'mix'; state.profile.morningAsked = 'yes';
+      replan(ctx.key); commit(); rerender(); renderSideWeek();
+      toast('Planning before school when your morning is free');
+      return;
+    }
     const out = applyProposal(e.plan, p, e.lighten || []);
     e.plan = out.plan;
     e.lighten = out.lightened;
@@ -1346,6 +1400,7 @@ function wireProposals(rerender) {
     toast(p.kind === 'lighten' ? `${p.title.replace(/^Make /, '').replace(/ lighter$/, '')} is now lighter` : 'Plan updated');
   }));
   app.querySelectorAll('[data-propno]').forEach((b) => b.addEventListener('click', () => {
+    if (b.dataset.propno === 'pref:mix') { state.profile.morningAsked = 'no'; commit(); rerender(); return; }
     e.dismissed = [...new Set([...(e.dismissed || []), b.dataset.propno])];
     commit(); rerender();
   }));
@@ -2287,7 +2342,7 @@ function renderHome() {
     ${todayOpen ? `<a class="btn primary big" href="${workoutHref(todays)}">${icon('play')}${loggedSets(key, todays, ctx.isShort(todays)) ? 'Continue today’s workout' : 'Start today’s workout'}</a>` : ''}
   </div>
   ${installBanner()}
-  ${(() => { const n = weekProposals(ctx).proposals.length; return n ? `<a class="card suggest-banner" href="#plan">${icon('spark')}<span><b>${n === 1 ? 'A suggested change' : `${n} suggested changes`} for your week</b><small>Based on your recovery and check-in. Open This week to accept or say no.</small></span></a>` : ''; })()}
+  ${(() => { const n = weekProposals(ctx).proposals.length; return n ? `<a class="card suggest-banner" href="#plan">${icon('spark')}<span><b>${n === 1 ? 'A suggested change' : `${n} suggested changes`} for your week</b><small>Open This week to accept or say no.</small></span></a>` : ''; })()}
   ${recapCard(key, ctx.nextUp, sessions.length)}
   ${stats}
   <div class="home-grid">
@@ -3532,7 +3587,7 @@ function coachContext() {
   if (said) lines.push(`What they told the app today: ${[said.sore && said.sore.length ? `${said.sore.join(', ')} sore` : '', said.tired ? 'very tired' : '', said.fresh && said.fresh.length ? `${said.fresh.join(', ')} feel recovered` : ''].filter(Boolean).join('; ')}.`);
   // The app's own suggestions (from logged training and check-ins only; never Strava). The coach can explain them; the athlete accepts them on This week.
   const sugg = weekProposals(ctx, { withStrava: false }).proposals;
-  if (sugg.length) lines.push(`Suggested changes the app is showing on This week (waiting for the athlete to accept or decline): ${sugg.map((p) => `${p.title}. ${p.reason}`).join(' | ')}`);
+  if (sugg.length) lines.push(`Questions and suggested changes the app is showing on the Coach and This week pages (waiting for the athlete's Yes or No; you cannot apply them): ${sugg.map((p) => `${p.title} ${p.reason}`).join(' | ')}`);
   lines.push(...nextWeekLines(key));
   const streak = streakInfo(state.history, key, targetFor, templateSport);
   const cons = consistency(data, key, 8, { targetFor, sportCreditFor: templateSport });
@@ -3609,6 +3664,7 @@ function renderCoach() {
   </div>
   <div class="coach-layout">
     <section class="card chat" aria-label="Chat with the coach">
+      ${coachAsks(weekCtx())}
       <div class="chatlog" id="chatlog" aria-live="polite">
         ${turns.length ? turns.map((t) => `<div class="msg ${t.role}">${t.role === 'user' ? `<p>${esc(t.content)}</p>` : formatReply(t.content)}</div>`).join('') : `
           <div class="coach-empty">
@@ -3678,6 +3734,7 @@ function renderCoach() {
 
   form.addEventListener('submit', (e) => { e.preventDefault(); if (!coachCtl) ask(box.value); });
   wireAvail(renderCoach);
+  wireProposals(renderCoach);
   app.querySelectorAll('[data-starter]').forEach((b) => b.addEventListener('click', () => ask(b.dataset.starter)));
   const clear = document.getElementById('coach-clear');
   if (clear) clear.addEventListener('click', () => { state.coach.turns = []; commit(); renderCoach(); });

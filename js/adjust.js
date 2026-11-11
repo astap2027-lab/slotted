@@ -117,3 +117,40 @@ export function applyProposal(plan, p, lightened = []) {
   });
   return { plan: out.sort((a, b) => a.day - b.day), lightened };
 }
+
+/**
+ * Free mornings: a session planned after midday on a day whose morning is free (for example school starts late).
+ * The question is whether to move it to that morning. App logic finds it; nothing changes until the athlete says yes.
+ * @param o.sessions    this week's sessions [{ key, name, day, start, end, locked, pinned }]
+ * @param o.todayIdx    0 = Monday
+ * @param o.nowMin      minutes past midnight
+ * @param o.isDone      (s) => bool
+ * @param o.morningSlot (day, length) => { start, end, until, first } | null (see morningSlot in scheduler.js)
+ * @param o.skip        (s) => bool, true when this session shouldn't move (can't train that day, heavy legs before a game, ...)
+ * @param o.dismissed   proposal ids the athlete said no to
+ * @returns { proposals }
+ */
+export function proposeMornings(o) {
+  const { sessions, todayIdx, nowMin, isDone, morningSlot, skip = () => false, dismissed = [] } = o;
+  const proposals = [];
+  for (const s of sessions) {
+    if (proposals.length >= 2) break;
+    const id = `morning:${s.key}:${s.day}`;
+    if (isDone(s) || s.locked || s.pinned || dismissed.includes(id) || skip(s)) continue;
+    if (s.day < todayIdx || (s.day === todayIdx && s.start <= nowMin)) continue;
+    if (s.start < 12 * 60) continue; // already a morning session
+    const len = s.end - s.start;
+    const slot = morningSlot(s.day, len);
+    if (!slot) continue;
+    if (s.day === todayIdx && slot.start <= nowMin + 15) continue; // that time has gone
+    const first = slot.first;
+    const travel = first && first.before ? `, allowing ${first.before} minutes to get there` : '';
+    proposals.push({
+      id, kind: 'morning', keys: [s.key],
+      title: `Do ${s.name} on ${s.day === todayIdx ? 'today' : DAYS[s.day]} at ${fmtTime(slot.start)}?`,
+      reason: `${s.day === todayIdx ? 'This morning' : `${DAYS[s.day]} morning`} is free${first ? `: your first commitment${first.type === 'school' ? ' (school)' : first.label ? ` (${first.label})` : ''} doesn’t start until ${fmtTime(first.start)}${travel}` : ''}, so you could train before it. It’s planned for ${fmtTime(s.start)} at the moment.`,
+      moves: [{ key: s.key, name: s.name, from: { day: s.day, start: s.start }, to: { day: s.day, start: slot.start, end: slot.end } }],
+    });
+  }
+  return { proposals };
+}
