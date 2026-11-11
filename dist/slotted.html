@@ -944,6 +944,10 @@ td .effort-opts { max-width: 300px; }
 .set input.need { border-color: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft); }
 .xnote { margin: 0; }
 
+/* ---------- the coach asks ---------- */
+.coach-asks { display: grid; gap: 10px; padding: 14px; margin-bottom: 14px; border: 1px solid var(--lime-line); border-radius: var(--r-md); background: var(--surface); }
+.coach-asks .proposal { background: var(--surface-2); }
+
 </style>
 <div class="shell">
     <aside class="sidebar" aria-label="Slotted">
@@ -1850,6 +1854,20 @@ function timePref(t, when = 'afternoon') {
 }
 
 const ANCHORS = [16 * 60, 9 * 60, 17 * 60, 10 * 60, 7 * 60, 18 * 60, 18 * 60 + 30, 19 * 60, 6 * 60 + 30];
+
+// A free morning: the gap at the start of the day (before the first commitment) ends between 9:15am and noon and is
+// long enough for a session. Returns where a session could go (7am if it fits, else from the start of the gap) and
+// what the first commitment is, or null.
+function morningSlot(blocks, day, window, length) {
+  const ws = toMin(window.start);
+  const gap = freeGaps(blocks, day, window).find(([a, b]) => a <= ws && b >= 9 * 60 + 15 && b <= 12 * 60 && b - a >= length);
+  if (!gap) return null;
+  const [a, b] = gap;
+  const start = a <= 7 * 60 && 7 * 60 + length <= b ? 7 * 60 : a;
+  if (start < 6 * 60 + 30 || start + length > b) return null;
+  const first = blocks.filter((x) => x.day === day).sort((x, y) => toMin(x.start) - toMin(y.start))[0];
+  return { start, end: start + length, until: b, first: first ? { start: toMin(first.start), label: first.label, type: first.type, before: Number(first.before) || 0 } : null };
+}
 
 // Best slot for a day: full-length if possible, else a short slot (>= 30 min), else null.
 function bestSlot(blocks, day, window, length, when = 'afternoon') {
@@ -3852,6 +3870,43 @@ function applyProposal(plan, p, lightened = []) {
   return { plan: out.sort((a, b) => a.day - b.day), lightened };
 }
 
+/**
+ * Free mornings: a session planned after midday on a day whose morning is free (for example school starts late).
+ * The question is whether to move it to that morning. App logic finds it; nothing changes until the athlete says yes.
+ * @param o.sessions    this week's sessions [{ key, name, day, start, end, locked, pinned }]
+ * @param o.todayIdx    0 = Monday
+ * @param o.nowMin      minutes past midnight
+ * @param o.isDone      (s) => bool
+ * @param o.morningSlot (day, length) => { start, end, until, first } | null (see morningSlot in scheduler.js)
+ * @param o.skip        (s) => bool, true when this session shouldn't move (can't train that day, heavy legs before a game, ...)
+ * @param o.dismissed   proposal ids the athlete said no to
+ * @returns { proposals }
+ */
+function proposeMornings(o) {
+  const { sessions, todayIdx, nowMin, isDone, morningSlot, skip = () => false, dismissed = [] } = o;
+  const proposals = [];
+  for (const s of sessions) {
+    if (proposals.length >= 2) break;
+    const id = `morning:${s.key}:${s.day}`;
+    if (isDone(s) || s.locked || s.pinned || dismissed.includes(id) || skip(s)) continue;
+    if (s.day < todayIdx || (s.day === todayIdx && s.start <= nowMin)) continue;
+    if (s.start < 12 * 60) continue; // already a morning session
+    const len = s.end - s.start;
+    const slot = morningSlot(s.day, len);
+    if (!slot) continue;
+    if (s.day === todayIdx && slot.start <= nowMin + 15) continue; // that time has gone
+    const first = slot.first;
+    const travel = first && first.before ? `, allowing ${first.before} minutes to get there` : '';
+    proposals.push({
+      id, kind: 'morning', keys: [s.key],
+      title: `Do ${s.name} on ${s.day === todayIdx ? 'today' : DAYS[s.day]} at ${fmtTime(slot.start)}?`,
+      reason: `${s.day === todayIdx ? 'This morning' : `${DAYS[s.day]} morning`} is free${first ? `: your first commitment${first.type === 'school' ? ' (school)' : first.label ? ` (${first.label})` : ''} doesn’t start until ${fmtTime(first.start)}${travel}` : ''}, so you could train before it. It’s planned for ${fmtTime(s.start)} at the moment.`,
+      moves: [{ key: s.key, name: s.name, from: { day: s.day, start: s.start }, to: { day: s.day, start: slot.start, end: slot.end } }],
+    });
+  }
+  return { proposals };
+}
+
 // ---- js/readiness.js ----
 // Daily check-in: three quick answers decide how hard today's session should be.
 // Four more are optional (sleep hours, tiredness, stress, how ready you feel) and only nudge the result.
@@ -3922,6 +3977,7 @@ const COACH_INSTRUCTIONS = `You are the coach inside Slotted, a gym planning app
 
 How to answer:
 - Use the athlete's data provided with each question: their plan, this week, next week, today's check-in and recent lifts. Refer to specific numbers and days when they help. Never invent data they haven't logged.
+- The data may list "Questions and suggested changes the app is showing" (for example moving a session to a free morning). The athlete answers them by tapping Yes or No on the Coach or This week page; you can't apply them. Mention a waiting one when it is relevant, and if they say yes in chat, tell them to tap Yes on that card. You may ask at most one short question of your own when something that matters is unknown (for example when they like to train). Never say you have moved or changed anything.
 - If the draft puts sessions after school but a day has a long free morning (for example school starts late, so there is time before it), say so and suggest a morning time. Any time you suggest must sit inside the "Free windows" listed for that day, allow for travel, and be offered as a suggestion they can apply with Move to another day or time (or by telling Slotted). Mention which draft times are the planner's and which are your ideas. Use each commitment's name (for example "O Group" or "Cadets"), never "something".
 - For questions about next week, use the "Next week" section: their real school, sport and other commitments, and the draft plan Slotted's planner made around them (those times already avoid their commitments). Explain or adjust that draft, and keep every sport or work commitment in mind (hard sport days are not leg days). Never invent times or treat a day as free when the data shows a commitment. If something looks missing, say so and point them to My week or the "Tell Slotted about a change" box. Take today's weekday and date from the "Today" line.
 - Be practical and short: a few short paragraphs or a short list. Plain language, Australian spelling, and the same weight units as their data (kg or lb).
@@ -4380,6 +4436,7 @@ function readProfile(form) {
     sessionsPerWeek: Number(f.get('sessionsPerWeek')),
     sessionLength: Number(f.get('sessionLength')),
     timeOfDay: f.get('timeOfDay') || 'afternoon',
+    ...(state.profile.morningAsked ? { morningAsked: state.profile.morningAsked } : {}),
   };
   state.name = String(f.get('name') || '').trim().slice(0, 40);
   state.restDays = f.getAll('restDays').map(Number);
@@ -5457,12 +5514,44 @@ function weekProposals(ctx, { withStrava = true } = {}) {
     return sl && !sl.short ? { start: sl.start, end: sl.end } : null;
   };
   const fits = (d, a, z) => freeGaps(blocksFor(ctx.key), d, winFor(ctx.key, d)).some(([x, y]) => a >= x && z <= y);
-  return proposeChanges({
+  const base = proposeChanges({
     sessions: e.plan, todayIdx: ctx.tIdx, nowMin: ctx.now, isDone: ctx.isDone, mainGroups, freshAt,
     labels: Object.fromEntries(MUSCLES.map((m) => [m.id, m.label])),
     readiness: readiness(e.checkins && e.checkins[ctx.tIdx]), report: e.reports && e.reports[ctx.tIdx],
     freeSlot, fits, dismissed: e.dismissed || [],
   });
+  // Questions about free mornings: move an after-school session to a free morning, or plan mornings from now on.
+  const used = new Set(base.proposals.flatMap((p) => p.keys));
+  const heavyLegsOnGameDay = (s) => sessionInfo(s.key).legs !== 'none' && blocksFor(ctx.key).some((b) => b.day === s.day && b.type === 'sport' && b.intensity === 'hard');
+  const mornings = proposeMornings({
+    sessions: e.plan.filter((x) => !used.has(x.key)), todayIdx: ctx.tIdx, nowMin: ctx.now, isDone: ctx.isDone,
+    morningSlot: (day, len) => morningSlot(blocksFor(ctx.key), day, winFor(ctx.key, day), len),
+    skip: (x) => skip.includes(x.day) || heavyLegsOnGameDay(x), dismissed: e.dismissed || [],
+  }).proposals;
+  const pref = prefQuestion(ctx);
+  return { proposals: [...base.proposals, ...mornings, ...(pref ? [pref] : [])], notes: base.notes };
+}
+
+// Asked once: should Slotted plan sessions before school on days when the morning is free? Yes switches Preferred time to Mix.
+function prefQuestion(ctx) {
+  const p = state.profile;
+  if (p.morningAsked || ['mix', 'morning'].includes(p.timeOfDay)) return null;
+  const len = Number(p.sessionLength) || 60;
+  const found = new Map();
+  for (const wk of [ctx.key, addWeeks(ctx.key, 1)]) {
+    const blocks = weekBlocks(state, wk);
+    for (let d = 0; d < 7; d++) {
+      const m = morningSlot(blocks, d, windowFor(state, wk, d), len);
+      if (m && m.first && !found.has(d)) found.set(d, m.first.start);
+    }
+  }
+  if (!found.size) return null;
+  const days = [...found.entries()].sort((a, b) => a[0] - b[0]).map(([d, t]) => `${DAYS[d]} (starts ${fmtTime(t)})`).join(', ').replace(/, ([^,]*)$/, ' and $1');
+  return {
+    id: 'pref:mix', kind: 'pref', keys: [], moves: [],
+    title: 'Plan sessions before school when your morning is free?',
+    reason: `You have free time before your first commitment on ${days}. Should Slotted plan sessions in those mornings and after school on other days? You can change this any time in Settings.`,
+  };
 }
 
 const slotText = (x) => `${DAYS_SHORT[x.day]} ${fmtTime(x.start)}`;
@@ -5475,11 +5564,26 @@ function proposalsCard(ctx) {
       <b>${esc(p.title)}</b>
       <p class="small">${esc(p.reason)}</p>
       ${p.moves.length ? `<ul class="propmoves">${p.moves.map((m) => `<li><b>${esc(m.name)}</b> moves from ${slotText(m.from)} to ${slotText(m.to)}</li>`).join('')}</ul>` : ''}
-      <div class="actions"><button type="button" class="primary" data-propyes="${esc(p.id)}">Accept</button><button type="button" class="ghost" data-propno="${esc(p.id)}">No thanks</button></div>
+      <div class="actions"><button type="button" class="primary" data-propyes="${esc(p.id)}">${p.kind === 'morning' ? 'Yes, move it' : p.kind === 'pref' ? 'Yes, plan mornings' : 'Accept'}</button><button type="button" class="ghost" data-propno="${esc(p.id)}">No thanks</button></div>
     </div>`).join('')}
     ${notes.map((n) => `<p class="small muted">${esc(n)}</p>`).join('')}
-    <p class="rec-note">Based on estimates from your logged training and check-in, not a medical measurement. Commitments are never moved.</p>
+    ${proposals.some((p) => !['morning', 'pref'].includes(p.kind)) ? '<p class="rec-note">Based on estimates from your logged training and check-in, not a medical measurement. Commitments are never moved.</p>' : '<p class="rec-note">Commitments are never moved.</p>'}
   </section>`;
+}
+
+// The coach's own questions (free mornings), shown above the chat. Same answers as the Suggested changes card.
+function coachAsks(ctx) {
+  const asks = weekProposals(ctx).proposals.filter((p) => ['morning', 'pref'].includes(p.kind));
+  if (!asks.length) return '';
+  return `<div class="coach-asks" aria-label="Questions from the coach">
+    <span class="label">The coach asks</span>
+    ${asks.map((p) => `<div class="proposal">
+      <b>${esc(p.title)}</b>
+      <p class="small">${esc(p.reason)}</p>
+      <div class="actions"><button type="button" class="primary" data-propyes="${esc(p.id)}">${p.kind === 'pref' ? 'Yes, plan mornings' : 'Yes, move it'}</button><button type="button" class="ghost" data-propno="${esc(p.id)}">No thanks</button></div>
+    </div>`).join('')}
+    <p class="small muted">Nothing changes unless you say yes.</p>
+  </div>`;
 }
 
 function wireProposals(rerender) {
@@ -5488,6 +5592,12 @@ function wireProposals(rerender) {
   app.querySelectorAll('[data-propyes]').forEach((b) => b.addEventListener('click', () => {
     const p = weekProposals(ctx).proposals.find((x) => x.id === b.dataset.propyes);
     if (!p) { rerender(); return; }
+    if (p.kind === 'pref') {
+      state.profile.timeOfDay = 'mix'; state.profile.morningAsked = 'yes';
+      replan(ctx.key); commit(); rerender(); renderSideWeek();
+      toast('Planning before school when your morning is free');
+      return;
+    }
     const out = applyProposal(e.plan, p, e.lighten || []);
     e.plan = out.plan;
     e.lighten = out.lightened;
@@ -5496,6 +5606,7 @@ function wireProposals(rerender) {
     toast(p.kind === 'lighten' ? `${p.title.replace(/^Make /, '').replace(/ lighter$/, '')} is now lighter` : 'Plan updated');
   }));
   app.querySelectorAll('[data-propno]').forEach((b) => b.addEventListener('click', () => {
+    if (b.dataset.propno === 'pref:mix') { state.profile.morningAsked = 'no'; commit(); rerender(); return; }
     e.dismissed = [...new Set([...(e.dismissed || []), b.dataset.propno])];
     commit(); rerender();
   }));
@@ -6437,7 +6548,7 @@ function renderHome() {
     ${todayOpen ? `<a class="btn primary big" href="${workoutHref(todays)}">${icon('play')}${loggedSets(key, todays, ctx.isShort(todays)) ? 'Continue today’s workout' : 'Start today’s workout'}</a>` : ''}
   </div>
   ${installBanner()}
-  ${(() => { const n = weekProposals(ctx).proposals.length; return n ? `<a class="card suggest-banner" href="#plan">${icon('spark')}<span><b>${n === 1 ? 'A suggested change' : `${n} suggested changes`} for your week</b><small>Based on your recovery and check-in. Open This week to accept or say no.</small></span></a>` : ''; })()}
+  ${(() => { const n = weekProposals(ctx).proposals.length; return n ? `<a class="card suggest-banner" href="#plan">${icon('spark')}<span><b>${n === 1 ? 'A suggested change' : `${n} suggested changes`} for your week</b><small>Open This week to accept or say no.</small></span></a>` : ''; })()}
   ${recapCard(key, ctx.nextUp, sessions.length)}
   ${stats}
   <div class="home-grid">
@@ -7682,7 +7793,7 @@ function coachContext() {
   if (said) lines.push(`What they told the app today: ${[said.sore && said.sore.length ? `${said.sore.join(', ')} sore` : '', said.tired ? 'very tired' : '', said.fresh && said.fresh.length ? `${said.fresh.join(', ')} feel recovered` : ''].filter(Boolean).join('; ')}.`);
   // The app's own suggestions (from logged training and check-ins only; never Strava). The coach can explain them; the athlete accepts them on This week.
   const sugg = weekProposals(ctx, { withStrava: false }).proposals;
-  if (sugg.length) lines.push(`Suggested changes the app is showing on This week (waiting for the athlete to accept or decline): ${sugg.map((p) => `${p.title}. ${p.reason}`).join(' | ')}`);
+  if (sugg.length) lines.push(`Questions and suggested changes the app is showing on the Coach and This week pages (waiting for the athlete's Yes or No; you cannot apply them): ${sugg.map((p) => `${p.title} ${p.reason}`).join(' | ')}`);
   lines.push(...nextWeekLines(key));
   const streak = streakInfo(state.history, key, targetFor, templateSport);
   const cons = consistency(data, key, 8, { targetFor, sportCreditFor: templateSport });
@@ -7759,6 +7870,7 @@ function renderCoach() {
   </div>
   <div class="coach-layout">
     <section class="card chat" aria-label="Chat with the coach">
+      ${coachAsks(weekCtx())}
       <div class="chatlog" id="chatlog" aria-live="polite">
         ${turns.length ? turns.map((t) => `<div class="msg ${t.role}">${t.role === 'user' ? `<p>${esc(t.content)}</p>` : formatReply(t.content)}</div>`).join('') : `
           <div class="coach-empty">
@@ -7828,6 +7940,7 @@ function renderCoach() {
 
   form.addEventListener('submit', (e) => { e.preventDefault(); if (!coachCtl) ask(box.value); });
   wireAvail(renderCoach);
+  wireProposals(renderCoach);
   app.querySelectorAll('[data-starter]').forEach((b) => b.addEventListener('click', () => ask(b.dataset.starter)));
   const clear = document.getElementById('coach-clear');
   if (clear) clear.addEventListener('click', () => { state.coach.turns = []; commit(); renderCoach(); });

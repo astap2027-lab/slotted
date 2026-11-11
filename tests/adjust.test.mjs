@@ -96,3 +96,60 @@ test('tiredness they typed is described as what they said, not as the check-in',
   assert.match(proposals[0].reason, /You said you’re very tired today/);
   assert.doesNotMatch(proposals[0].reason, /check-in/);
 });
+
+// ---------- free mornings ----------
+import { proposeMornings } from '../js/adjust.js';
+import { morningSlot, toMin } from '../js/scheduler.js';
+
+const W = { start: '06:00', end: '21:00' };
+const wedLate = [{ day: 2, start: '09:40', end: '15:15', type: 'school', label: 'School', before: 10 }, { day: 0, start: '08:45', end: '15:15', type: 'school', label: 'School' }];
+const pm = (over = {}) => ({ key: 'lowerA', name: 'Lower A', day: 2, start: 960, end: 1020, ...over });
+const mo = (over = {}) => ({
+  sessions: [pm()], todayIdx: 0, nowMin: 600, isDone: () => false,
+  morningSlot: (day, len) => morningSlot(wedLate, day, W, len), ...over,
+});
+
+test('morningSlot finds a free morning before a late start, with travel allowed', () => {
+  const m = morningSlot(wedLate, 2, W, 60);
+  assert.equal(m.start, 420); assert.equal(m.end, 480);
+  assert.equal(m.until, toMin('09:40') - 15 - 10);
+  assert.equal(m.first.start, toMin('09:40')); assert.equal(m.first.before, 10);
+  assert.equal(morningSlot(wedLate, 0, W, 60), null, 'school at 8:45 leaves no morning for a session');
+  assert.equal(morningSlot([], 5, W, 60), null, 'a day with nothing on is not a free morning');
+  assert.equal(morningSlot(wedLate, 2, W, 200), null, 'too long for the morning');
+});
+
+test('a free morning on a late-start day: ask whether to move the after-school session there', () => {
+  const { proposals } = proposeMornings(mo());
+  assert.equal(proposals.length, 1);
+  const p = proposals[0];
+  assert.equal(p.kind, 'morning'); assert.equal(p.id, 'morning:lowerA:2');
+  assert.match(p.title, /Do Lower A on Wednesday at 7am\?/);
+  assert.match(p.reason, /Wednesday morning is free/); assert.match(p.reason, /9:40am/); assert.match(p.reason, /10 minutes/);
+  assert.match(p.reason, /4pm/);
+  assert.deepEqual(p.moves[0].to, { day: 2, start: 420, end: 480 });
+  // Accepting moves it and pins it (existing behaviour of applyProposal).
+  const out = applyProposal([pm()], p, []);
+  assert.equal(out.plan[0].start, 420); assert.equal(out.plan[0].pinned, true);
+});
+
+test('no morning question for done, past, locked, hand-placed, morning, skipped, dismissed or too-late sessions', () => {
+  for (const [name, o] of [
+    ['done', { isDone: () => true }],
+    ['past day', { todayIdx: 3 }],
+    ['locked', { sessions: [pm({ locked: true })] }],
+    ['hand-placed', { sessions: [pm({ pinned: true })] }],
+    ['already a morning session', { sessions: [pm({ start: 420, end: 480 })] }],
+    ['skipped day or heavy legs on a game day', { skip: () => true }],
+    ['dismissed', { dismissed: ['morning:lowerA:2'] }],
+    ['no free morning that day', { sessions: [pm({ day: 0 })] }],
+  ]) assert.equal(proposeMornings(mo(o)).proposals.length, 0, name);
+  // Today: the morning has already gone.
+  assert.equal(proposeMornings(mo({ todayIdx: 2, nowMin: 8 * 60 })).proposals.length, 0, 'it is 8am and the slot is 7am');
+  assert.equal(proposeMornings(mo({ todayIdx: 2, nowMin: 5 * 60 })).proposals.length, 1, 'still ahead this morning');
+});
+
+test('at most two morning questions at once', () => {
+  const sessions = [pm({ key: 'a' }), pm({ key: 'b', day: 2 }), pm({ key: 'c', day: 2 })];
+  assert.equal(proposeMornings(mo({ sessions })).proposals.length, 2);
+});

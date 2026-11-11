@@ -284,6 +284,20 @@ function timePref(t, when = 'afternoon') {
 
 const ANCHORS = [16 * 60, 9 * 60, 17 * 60, 10 * 60, 7 * 60, 18 * 60, 18 * 60 + 30, 19 * 60, 6 * 60 + 30];
 
+// A free morning: the gap at the start of the day (before the first commitment) ends between 9:15am and noon and is
+// long enough for a session. Returns where a session could go (7am if it fits, else from the start of the gap) and
+// what the first commitment is, or null.
+export function morningSlot(blocks, day, window, length) {
+  const ws = toMin(window.start);
+  const gap = freeGaps(blocks, day, window).find(([a, b]) => a <= ws && b >= 9 * 60 + 15 && b <= 12 * 60 && b - a >= length);
+  if (!gap) return null;
+  const [a, b] = gap;
+  const start = a <= 7 * 60 && 7 * 60 + length <= b ? 7 * 60 : a;
+  if (start < 6 * 60 + 30 || start + length > b) return null;
+  const first = blocks.filter((x) => x.day === day).sort((x, y) => toMin(x.start) - toMin(y.start))[0];
+  return { start, end: start + length, until: b, first: first ? { start: toMin(first.start), label: first.label, type: first.type, before: Number(first.before) || 0 } : null };
+}
+
 // Best slot for a day: full-length if possible, else a short slot (>= 30 min), else null.
 export function bestSlot(blocks, day, window, length, when = 'afternoon') {
   const gaps = freeGaps(blocks, day, window);
