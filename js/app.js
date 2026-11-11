@@ -101,6 +101,8 @@ const BRAND = `<span class="setup-brand"><svg class="brand-mark" viewBox="0 0 26
 const MUSCLE_LABEL = Object.fromEntries(MUSCLES.map((m) => [m.id, m.label]));
 const fmtNum = (n) => Math.round(n).toLocaleString('en-AU');
 const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
+// The release number. It must match CACHE in sw.js (a test checks); shown at the bottom of Settings.
+const APP_VERSION = 32;
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const subnav = (cur) => `<nav class="subnav" aria-label="Training">${[['plan', 'This week'], ['week', 'My week'], ['routine', 'Routine'], ['library', 'Library']]
   .map(([v, t]) => `<a href="#${v}" ${v === cur ? 'aria-current="page"' : ''}>${t}</a>`).join('')}</nav>`;
@@ -4009,6 +4011,7 @@ function renderSettings() {
         </div>
         <div class="actions"><button type="button" class="ghost danger" id="reset">Delete everything on this device</button></div>
       </section>
+      <p class="muted small app-version">Slotted version ${APP_VERSION}</p>
     </div>
   </div>`;
 
@@ -4068,8 +4071,24 @@ window.addEventListener('resize', () => {
   if (viewName() === 'progress') { clearTimeout(drawChart.t); drawChart.t = setTimeout(drawChart, 120); }
 });
 
+// Offline support. When a new version takes over a page that was already running, say so and offer a reload
+// (never automatic, so a half-typed set isn't lost). Check for a new version whenever the app comes back into view.
 if ('serviceWorker' in navigator && location.protocol === 'https:' && !location.hostname.endsWith('claude.ai')) {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  const hadWorker = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.register('sw.js').then((reg) => {
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
+  }).catch(() => {});
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadWorker) showUpdateBanner(); });
+}
+function showUpdateBanner() {
+  if (document.getElementById('update-banner')) return;
+  const bar = document.createElement('div');
+  bar.id = 'update-banner';
+  bar.className = 'update-banner';
+  bar.setAttribute('role', 'status');
+  bar.innerHTML = '<span>Slotted has been updated.</span><button type="button" class="primary">Reload</button>';
+  bar.querySelector('button').addEventListener('click', () => location.reload());
+  document.body.appendChild(bar);
 }
 
 loadLibrary();
