@@ -27,7 +27,7 @@ export async function onRequestPost({ request, env }) {
   }
   const text = String(body.text || '').trim().slice(0, 400) || (images.length ? 'Here is my timetable.' : '');
   if (!text) return json({ error: 'bad_request' }, 400);
-  const context = String(body.context || '').slice(0, 2000);
+  const context = String(body.context || '').slice(0, 5000);
 
   if (env.COACH_LIMITS) {
     const visitor = request.headers.get('CF-Connecting-IP') || 'unknown';
@@ -39,31 +39,43 @@ export async function onRequestPost({ request, env }) {
 
   if (images.length) return readPhotos(env, images, text);
 
-  let res;
-  try {
-    res = await fetch(API_URL, {
-      method: 'POST',
-      headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': API_VERSION, 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: env.COACH_MODEL || 'claude-haiku-5-5',
-        max_tokens: 1500,
-        // A forced tool call returns the changes as structured data; thinking is off so the tool can be forced.
-        thinking: { type: 'disabled' },
-        system: `${TIMETABLE_PROMPT}\n\nThe athlete's current week:\n${context}`,
-        tools: [{ name: 'timetable_changes', description: 'The structured changes described by the sentence.', input_schema: TIMETABLE_SCHEMA }],
-        tool_choice: { type: 'tool', name: 'timetable_changes' },
-        messages: [{ role: 'user', content: text }],
-      }),
-    });
-  } catch {
-    return json({ error: 'upstream_error' }, 502);
+  return readSentence(env, text, context);
+}
+
+// ---------- typed sentences ----------
+// A sentence the app's own rules couldn't fully understand. A stronger model reads it (it thinks first and may
+// ask a question instead of guessing); if it can't be reached, the coach's model has one try. The reply is only
+// structured changes: the app checks every one and the user approves them.
+const TEXT_TOOL = { name: 'timetable_changes', description: 'The structured changes described by the sentence.', input_schema: TIMETABLE_SCHEMA };
+const TEXT_STRONG_MS = 40000;
+const TEXT_FALLBACK_MS = 20000;
+
+async function readSentence(env, text, context) {
+  const base = {
+    system: `${TIMETABLE_PROMPT}\n\nThe athlete's timetable:\n${context}`,
+    tools: [TEXT_TOOL],
+    messages: [{ role: 'user', content: `${text}\n\nAnswer by calling the timetable_changes tool.` }],
+  };
+  // Claude Sonnet 5.5: thinking stays on (it can't be disabled) and the tool can't be forced, so the
+  // prompt asks for the tool call and we check that it happened.
+  let out = await toolCall(env, {
+    ...base, model: env.TEXT_MODEL || 'claude-sonnet-5-5', max_tokens: 4000,
+    tool_choice: { type: 'auto' }, output_config: { effort: 'medium' },
+  }, TEXT_STRONG_MS, TEXT_TOOL.name);
+  if (!out.input) {
+    out = await toolCall(env, {
+      ...base, model: env.COACH_MODEL || 'claude-haiku-5-5', max_tokens: 1500,
+      thinking: { type: 'disabled' }, tool_choice: { type: 'tool', name: TEXT_TOOL.name },
+    }, TEXT_FALLBACK_MS, TEXT_TOOL.name);
   }
-  if (res.status === 429 || res.status === 529) return json({ error: 'busy' }, 502);
-  if (!res.ok) return json({ error: 'upstream_error' }, 502);
-  const data = await res.json().catch(() => ({}));
-  const call = (data.content || []).find((b) => b.type === 'tool_use' && b.name === 'timetable_changes');
-  if (!call) return json({ changes: [], note: 'I couldn’t turn that into a timetable change.' });
-  return json({ changes: cleanChanges(call.input && call.input.changes), note: String((call.input && call.input.note) || '').slice(0, 300) });
+  if (out.failed === 'timeout') return json({ error: 'timeout' }, 504);
+  if (out.failed) return json({ error: out.failed }, 502);
+  if (!out.input) return json({ changes: [], note: 'I couldn’t turn that into a timetable change.' });
+  return json({
+    changes: cleanChanges(out.input.changes),
+    note: String(out.input.note || '').slice(0, 300),
+    clarify: String(out.input.clarify || '').slice(0, 200),
+  });
 }
 
 // ---------- photos ----------
@@ -81,7 +93,7 @@ const PHOTO_TOOL = {
 const STRONG_MS = 65000;
 const FALLBACK_MS = 25000;
 
-async function photoCall(env, body, ms) {
+async function toolCall(env, body, ms, toolName) {
   let res;
   try {
     res = await fetch(API_URL, {
@@ -97,7 +109,7 @@ async function photoCall(env, body, ms) {
   if (!res.ok) return { failed: 'upstream_error' };
   const data = await res.json().catch(() => ({}));
   // Replies can start with thinking blocks, so pick the tool call by type.
-  const call = (data.content || []).find((b) => b.type === 'tool_use' && b.name === PHOTO_TOOL.name);
+  const call = (data.content || []).find((b) => b.type === 'tool_use' && b.name === toolName);
   return { input: call && call.input && typeof call.input === 'object' ? call.input : null, stop: data.stop_reason };
 }
 
@@ -112,15 +124,15 @@ async function readPhotos(env, images, text) {
   const base = { system: PHOTO_PROMPT, tools: [PHOTO_TOOL], messages: [{ role: 'user', content }] };
   // Claude Sonnet 5.5: thinking stays on (it can't be disabled) and the tool can't be forced, so the
   // prompt asks for the tool call and we check that it happened.
-  let out = await photoCall(env, {
+  let out = await toolCall(env, {
     ...base, model: env.PHOTO_MODEL || 'claude-sonnet-5-5', max_tokens: 8000,
     tool_choice: { type: 'auto' }, output_config: { effort: 'medium' },
-  }, STRONG_MS);
+  }, STRONG_MS, PHOTO_TOOL.name);
   if (!out.input) {
-    out = await photoCall(env, {
+    out = await toolCall(env, {
       ...base, model: env.COACH_MODEL || 'claude-haiku-5-5', max_tokens: 8000,
       thinking: { type: 'disabled' }, tool_choice: { type: 'tool', name: PHOTO_TOOL.name },
-    }, FALLBACK_MS);
+    }, FALLBACK_MS, PHOTO_TOOL.name);
   }
   if (out.failed === 'timeout') return json({ error: 'timeout' }, 504);
   if (out.failed) return json({ error: out.failed }, 502);

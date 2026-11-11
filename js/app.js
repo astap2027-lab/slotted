@@ -1358,6 +1358,8 @@ function wireProposals(rerender) {
 let avail = { text: '', busy: false, changes: null, bad: [], note: '', done: '', photo: false, raw: null, retry: false, progress: null };
 // Photos of a timetable waiting to be read: [{ media_type, data (base64), url (for the thumbnail) }]. Never saved.
 let availImgs = [];
+let availTpl = 'both'; // with Week A/B on: which timetable week an every-week typed change applies to
+let availUndo = null; // what the last typed change replaced, so it can be undone (kept only until the page is closed)
 let availWeek = 'both'; // with Week A/B on and one photo: which week it shows ('A', 'B' or 'both')
 let availSwap = false; // with two photos: swap which one is Week A and which is Week B
 
@@ -1439,23 +1441,51 @@ function photoPreviewHtml(ctx) {
   </div>`;
 }
 
+// An every-week change that doesn't name a timetable week, with Week A/B on: the user picks A, B or both.
+const needsTplChoice = (list) => state.useAB && list.some((c) => c.scope === 'always' && ['set_times', 'remove', 'add'].includes(c.op) && !c.templates);
+const availTplOpts = (list) => (needsTplChoice(list) && availTpl !== 'both' ? { templates: [availTpl] } : {});
+
+// Parts of the state a typed change can touch, so it can be undone.
+const UNDO_WEEK_FIELDS = ['extra', 'hidden', 'windows', 'skipDays', 'reports'];
+function undoSnapshot(ctx) {
+  const copy = (x) => JSON.parse(JSON.stringify(x === undefined ? null : x));
+  const weeks = {};
+  for (const wk of [ctx.key, addWeeks(ctx.key, 1)]) {
+    const e = (state.history || {})[wk] || {};
+    weeks[wk] = Object.fromEntries(UNDO_WEEK_FIELDS.map((f) => [f, copy(e[f])]));
+  }
+  return { blocks: copy(state.blocks), restDays: copy(state.restDays || []), dayWindows: copy(state.dayWindows || {}), weeks };
+}
+function undoRestore(snap, ctx) {
+  const copy = (x) => JSON.parse(JSON.stringify(x));
+  state.blocks = copy(snap.blocks); state.restDays = copy(snap.restDays); state.dayWindows = copy(snap.dayWindows);
+  state.history = state.history || {};
+  for (const [wk, fields] of Object.entries(snap.weeks)) {
+    const e = (state.history[wk] = state.history[wk] || {});
+    for (const f of UNDO_WEEK_FIELDS) { if (fields[f] === null) delete e[f]; else e[f] = copy(fields[f]); }
+  }
+  replan(ctx.key);
+  commit();
+}
+
 function availPreview() {
   const ctx = weekCtx();
   if (avail.busy) {
     const pr = avail.progress;
-    return `<p class="small muted" role="status">${avail.photo ? `Reading your timetable${pr && pr.total > 1 ? `: ${pr.done} of ${pr.total} photos done` : ''}. This can take up to a minute…` : 'Working it out…'}</p>`;
+    return `<p class="small muted" role="status">${avail.photo ? `Reading your timetable${pr && pr.total > 1 ? `: ${pr.done} of ${pr.total} photos done` : ''}. This can take up to a minute…` : 'Working it out. Unusual wording can take up to a minute…'}</p>`;
   }
   if (avail.photo && avail.raw !== null && !avail.done) return photoPreviewHtml(ctx);
-  if (avail.done) return `<div class="avail-done" role="status"><p class="small"><b>${esc(avail.done)}</b></p>${proposalsCard(ctx)}</div>`;
+  if (avail.done) return `<div class="avail-done" role="status"><p class="small"><b>${esc(avail.done)}</b></p>${availUndo ? '<div class="actions"><button type="button" class="ghost" id="av-undo">Undo this change</button></div>' : ''}${proposalsCard(ctx)}</div>`;
   if (!avail.changes) return avail.note ? `<p class="small" role="status">${esc(avail.note)}</p>` : '';
   const good = avail.changes;
   if (!good.length) {
     return `<div class="avail-preview" role="status"><p class="small">${esc(avail.note || 'Slotted couldn’t work out a change from that.')}</p>
       ${avail.bad.length ? `<ul class="small">${avail.bad.map((b) => `<li>${esc(b)}</li>`).join('')}</ul>` : ''}
       ${avail.retry ? '<div class="actions"><button type="button" class="primary" id="av-retry">Try again</button></div>' : ''}
-      <p class="small muted">${avail.photo ? 'You can add your commitments by hand below.' : 'Try naming the day and time, like “I finish school at 2:30 on Wednesdays”, or change it below in My week.'}</p></div>`;
+      ${avail.ask ? '<p class="small muted">Answer in the box above and press Check it again.</p>' : `<p class="small muted">${avail.photo ? 'You can add your commitments by hand below.' : 'Try naming the day and time, like “I finish school at 2:30 on Wednesdays”, or change it below in My week.'}</p>`}</div>`;
   }
-  const next = applyChanges(state, good, ctx.key, ctx.tIdx);
+  const tplOpts = availTplOpts(good);
+  const next = applyChanges(state, good, ctx.key, ctx.tIdx, tplOpts);
   const sim = simulatePlan(next, ctx.key);
   const diff = planDiff(ctx.entry.plan, sim.plan);
   // Locked or hand-placed sessions stay put; say so if a change now clashes with one.
@@ -1464,6 +1494,7 @@ function availPreview() {
   return `<div class="avail-preview" role="status">
     <span class="label">What will change</span>
     <ul class="propmoves">${good.map((c) => `<li>${esc(describeChange(c, ctx.key, ctx.tIdx))}${touchesFixed(c, state, ctx.key) ? ' <span class="badge">Fixed commitment</span>' : ''}</li>`).join('')}</ul>
+    ${needsTplChoice(good) ? `<div class="field"><label for="av-tpl">Applies to</label><select id="av-tpl">${[['both', 'Week A and Week B'], ['A', 'Week A only'], ['B', 'Week B only']].map(([v, t]) => `<option value="${v}" ${availTpl === v ? 'selected' : ''}>${t}</option>`).join('')}</select><p class="small muted">You didn’t say which week, so this would change both. Pick one if it’s only for a single week.</p></div>` : ''}
     ${avail.bad.length ? `<p class="small muted">Left out: ${esc(avail.bad.join(' '))}</p>` : ''}
     <span class="label">This week’s plan</span>
     ${diff.length ? `<ul class="propmoves">${diff.map((d) => `<li>${esc(d)}</li>`).join('')}</ul>` : '<p class="small">No sessions need to move.</p>'}
@@ -1505,8 +1536,8 @@ function wireAvail(rerender) {
     const ctx = weekCtx();
     const said = text.value.trim();
     if (!said && !availImgs.length) return;
-    avail = { text: said, busy: false, changes: null, bad: [], note: '', done: '', photo: availImgs.length > 0, raw: null, retry: false, progress: null };
-    availSwap = false;
+    avail = { text: said, busy: false, changes: null, bad: [], note: '', done: '', photo: availImgs.length > 0, raw: null, retry: false, progress: null, ask: false };
+    availSwap = false; availTpl = 'both'; availUndo = null;
     let changes;
     if (avail.photo) {
       avail.busy = true; rerender();
@@ -1530,18 +1561,33 @@ function wireAvail(rerender) {
       avail.raw = res.photo || {};
       avail.note = res.photo ? res.note : (res.note || 'That couldn’t be read. Try a clear screenshot of your timetable.');
       rerender(); return;
-    } else ({ changes } = parseAvailability(said, { todayIdx: ctx.tIdx }));
+    } else {
+      const local = parseAvailability(said, { todayIdx: ctx.tIdx, useAB: !!state.useAB });
+      changes = local.changes;
+      // Understood, but nothing can be done (for example Week A/B is off): say why instead of asking the AI.
+      if (local.understood && !changes.length && local.note) { avail.changes = []; avail.note = local.note; rerender(); return; }
+    }
     if (!avail.photo && !changes.length) {
       avail.busy = true; rerender();
-      const res = await askTimetable(said, timetableContext(state, ctx.key, ctx.tIdx));
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 70000);
+      let res;
+      try { res = await askTimetable(said, timetableContext(state, ctx.key, ctx.tIdx), { signal: ctl.signal }); } finally { clearTimeout(timer); }
+      if (ctl.signal.aborted) res = { error: 'timeout' };
       avail.busy = false;
       if (res.error) {
         avail.changes = [];
-        avail.note = res.error === 'offline' ? 'You’re offline, and Slotted couldn’t read that on its own.' : 'Slotted couldn’t read that on its own, and the AI isn’t available right now.';
+        avail.retry = ['timeout', 'busy', 'upstream_error'].includes(res.error);
+        avail.note = res.error === 'offline' ? 'You’re offline, and Slotted couldn’t read that on its own.'
+          : res.error === 'timeout' ? 'That took too long and was stopped. Nothing was changed. Try again, or change it in My week.'
+          : res.error === 'rate_limited' ? 'You’ve used today’s AI questions. Change it in My week, or try again tomorrow.'
+          : 'Slotted couldn’t read that on its own, and the AI isn’t available right now.';
         rerender(); return;
       }
       changes = res.changes;
       avail.note = res.note;
+      // The AI asked a question instead of guessing: show it, apply nothing.
+      if (res.clarify && !changes.length) { avail.changes = []; avail.note = res.clarify; avail.ask = true; rerender(); return; }
     }
     const bad = [];
     avail.changes = changes.filter((c) => {
@@ -1558,7 +1604,9 @@ function wireAvail(rerender) {
     const fromPhoto = avail.photo && avail.raw !== null;
     const plan = fromPhoto ? photoPlanNow() : null;
     const list = fromPhoto ? plan.groups.flatMap((g) => g.changes) : avail.changes;
-    state = fromPhoto ? applyPhotoPlan(state, plan, ctx) : applyChanges(state, list, ctx.key, ctx.tIdx);
+    const snap = undoSnapshot(ctx);
+    state = fromPhoto ? applyPhotoPlan(state, plan, ctx) : applyChanges(state, list, ctx.key, ctx.tIdx, availTplOpts(list));
+    availUndo = snap;
     // Rebuild the weeks the changes touch (this week now; next week rebuilds itself when it starts).
     replan(ctx.key);
     commit();
@@ -1566,6 +1614,16 @@ function wireAvail(rerender) {
     if (fromPhoto) availImgs = [];
     rerender(); renderSideWeek();
   });
+  const undo = document.getElementById('av-undo');
+  if (undo) undo.addEventListener('click', () => {
+    const snap = availUndo; if (!snap) return;
+    availUndo = null;
+    undoRestore(snap, weekCtx());
+    avail = { text: '', busy: false, changes: null, bad: [], note: 'Undone. Your timetable is back to how it was.', done: '', photo: false, raw: null, retry: false, progress: null };
+    rerender(); renderSideWeek();
+  });
+  const tplSel = document.getElementById('av-tpl');
+  if (tplSel) tplSel.addEventListener('change', () => { availTpl = tplSel.value; rerender(); });
   const no = document.getElementById('av-no');
   if (no) no.addEventListener('click', () => { avail = { ...avail, changes: null, bad: [], note: '', raw: null }; rerender(); });
   const retry = document.getElementById('av-retry');

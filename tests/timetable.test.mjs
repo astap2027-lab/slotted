@@ -158,10 +158,14 @@ test('the timetable endpoint forces structured output and cleans it', async () =
   const res = await onRequestPost({ request: req({ text: 'Swimming carnival on Saturday so no gym', context: 'Mon: free' }), env: { ANTHROPIC_API_KEY: 'k' } });
   const out = await res.json();
   assert.deepEqual(out.changes, [{ op: 'skip_day', day: 5, week: 'this' }]);
-  assert.equal(sent.tool_choice.name, 'timetable_changes');
-  assert.equal(sent.thinking.type, 'disabled');
-  assert.equal(sent.model, 'claude-haiku-5-5');
+  // Typed sentences go to the stronger model: thinking left on, the tool offered (not forced), a clarify field available.
+  assert.equal(sent.model, 'claude-sonnet-5-5');
+  assert.equal(sent.thinking, undefined);
+  assert.deepEqual(sent.tool_choice, { type: 'auto' });
+  assert.equal(sent.tools[0].name, 'timetable_changes');
+  assert.ok(sent.tools[0].input_schema.properties.clarify);
   assert.match(sent.system, /Mon: free/);
+  assert.match(sent.system, /Never guess/);
 });
 
 test('flexible commitments give way only when the week is too full; fixed ones never do', async () => {
@@ -376,11 +380,19 @@ test('the timetable endpoint reads photos with the stronger model, falls back, a
   globalThis.fetch = async () => new Response('{}', { status: 500 });
   assert.equal((await onRequestPost({ request: req({ images }), env })).status, 502);
 
-  // Typed sentences are unchanged: the coach's model with a forced tool.
+  // Typed sentences: the stronger model first; if it gives no tool call, the coach's model with a forced tool.
   calls.length = 0;
-  globalThis.fetch = async (url, init) => { calls.push(JSON.parse(init.body)); return new Response(JSON.stringify({ content: [{ type: 'tool_use', name: 'timetable_changes', input: { changes: [{ op: 'skip_day', day: 5, week: 'this' }] } }] }), { status: 200 }); };
-  assert.deepEqual((await (await onRequestPost({ request: req({ text: 'no gym saturday' }), env })).json()).changes, [{ op: 'skip_day', day: 5, week: 'this' }]);
-  assert.equal(calls[0].model, 'claude-haiku-5-5'); assert.deepEqual(calls[0].tool_choice, { type: 'tool', name: 'timetable_changes' });
+  const sentence = { op: 'skip_day', day: 5, week: 'this' };
+  globalThis.fetch = async (url, init) => { const b = JSON.parse(init.body); calls.push(b); return b.model === 'claude-sonnet-5-5' ? reply(null) : new Response(JSON.stringify({ content: [{ type: 'tool_use', name: 'timetable_changes', input: { changes: [sentence] } }] }), { status: 200 }); };
+  assert.deepEqual((await (await onRequestPost({ request: req({ text: 'no gym saturday' }), env })).json()).changes, [sentence]);
+  assert.deepEqual(calls.map((b) => b.model), ['claude-sonnet-5-5', 'claude-haiku-5-5']);
+  assert.deepEqual(calls[1].tool_choice, { type: 'tool', name: 'timetable_changes' }); assert.deepEqual(calls[1].thinking, { type: 'disabled' });
+  // A question comes back as a question, with nothing to apply; a timeout is a 504.
+  globalThis.fetch = async () => new Response(JSON.stringify({ content: [{ type: 'tool_use', name: 'timetable_changes', input: { changes: [], clarify: 'Is that Week A, Week B or both?' } }] }), { status: 200 });
+  const asked = await (await onRequestPost({ request: req({ text: 'school starts at 9:40' }), env })).json();
+  assert.deepEqual(asked.changes, []); assert.equal(asked.clarify, 'Is that Week A, Week B or both?');
+  globalThis.fetch = async () => { const e = new Error('slow'); e.name = 'TimeoutError'; throw e; };
+  assert.equal((await onRequestPost({ request: req({ text: 'school starts at 9:40' }), env })).status, 504);
 
   calls.length = 0;
   for (const bad of [
@@ -466,4 +478,88 @@ test('the endpoint gives the stronger model a time limit, then the fallback a sh
   assert.ok(signals.every((s) => s instanceof AbortSignal), 'both calls are time-limited');
   assert.deepEqual(bodies[0].output_config, { effort: 'medium' });
   assert.equal(bodies[0].max_tokens, 8000);
+});
+
+// ---------- sentences: Week A/B, travel time, and not guessing ----------
+const AB = (extra = {}) => ({
+  useAB: true, abAnchor: { week: '2026-11-02', type: 'A' }, window: { start: '06:00', end: '21:00' }, restDays: [], history: {},
+  blocks: {
+    A: [0, 1, 2, 3, 4].map((d) => ({ id: `a${d}`, day: d, start: '08:45', end: '15:15', type: 'school', label: 'School' })),
+    B: [0, 1, 2, 3, 4].map((d) => ({ id: `b${d}`, day: d, start: '08:45', end: '15:15', type: 'school', label: 'School' })),
+  }, ...extra,
+});
+const AXEL = 'On Monday and Wednesday morning week B I have a free period which means I start school at 9:40am. It takes approximately 10 minutes to get to school';
+
+test('Axel’s sentence: Week B only, 9:40 start, 10 minutes of travel, Monday and Wednesday', async () => {
+  const { parseAvailability, applyChanges, describeChange, validateChange } = await import('../js/timetable.js');
+  const r = parseAvailability(AXEL, { todayIdx: 2, useAB: true });
+  assert.equal(r.understood, true);
+  assert.equal(r.changes.length, 2);
+  assert.deepEqual(r.changes.map((c) => c.match.day).sort(), [0, 2]);
+  for (const c of r.changes) {
+    assert.equal(c.op, 'set_times'); assert.equal(c.start, '09:40'); assert.equal(c.before, 10);
+    assert.deepEqual(c.templates, ['B']); assert.equal(c.scope, 'always');
+    assert.deepEqual(validateChange(c, AB(), '2026-11-09'), []);
+  }
+  assert.match(describeChange(r.changes[0], '2026-11-09', 2), /starts at 9:40am every Monday, Week B only, with 10 min travel before/);
+  const out = applyChanges(AB(), r.changes, '2026-11-09', 2);
+  const school = (t, d) => out.blocks[t].find((b) => b.day === d);
+  assert.equal(school('B', 0).start, '09:40'); assert.equal(school('B', 0).before, 10);
+  assert.equal(school('B', 2).start, '09:40');
+  assert.equal(school('B', 1).start, '08:45', 'other days untouched');
+  assert.equal(school('A', 0).start, '08:45', 'Week A untouched');
+  assert.equal(school('A', 0).before, undefined);
+  assert.equal(school('B', 0).end, '15:15', 'the finish time is untouched');
+});
+
+test('a sentence naming Week A targets only Week A; without a week it applies to all and nothing is hidden', async () => {
+  const { parseAvailability, applyChanges } = await import('../js/timetable.js');
+  const a = parseAvailability('In week A school starts at 9:40 on Mondays', { todayIdx: 0, useAB: true });
+  assert.deepEqual(a.changes[0].templates, ['A']);
+  const out = applyChanges(AB(), a.changes, '2026-11-09', 0);
+  assert.equal(out.blocks.A[0].start, '09:40'); assert.equal(out.blocks.B[0].start, '08:45');
+  const none = parseAvailability('School starts at 9:40 on Mondays', { todayIdx: 0, useAB: true });
+  assert.equal(none.changes[0].templates, undefined);
+  const both = applyChanges(AB(), none.changes, '2026-11-09', 0);
+  assert.equal(both.blocks.A[0].start, '09:40'); assert.equal(both.blocks.B[0].start, '09:40');
+  // The Apply-time choice (the preview’s "Week A / Week B / Both") narrows it.
+  const onlyB = applyChanges(AB(), none.changes, '2026-11-09', 0, { templates: ['B'] });
+  assert.equal(onlyB.blocks.A[0].start, '08:45'); assert.equal(onlyB.blocks.B[0].start, '09:40');
+});
+
+test('week A/B off: naming a week is refused with a plain note, not guessed', async () => {
+  const { parseAvailability } = await import('../js/timetable.js');
+  const r = parseAvailability('week b school starts at 9:40 on Monday', { todayIdx: 0, useAB: false });
+  assert.equal(r.understood, true); assert.deepEqual(r.changes, []); assert.match(r.note, /isn’t switched on/);
+});
+
+test('plain sentences still parse locally; ones with meaning the rules miss go to the AI', async () => {
+  const { parseAvailability } = await import('../js/timetable.js');
+  const local = parseAvailability('I finish school at 1:05 pm on Tuesdays', { todayIdx: 0, useAB: true });
+  assert.equal(local.understood, true); assert.equal(local.changes[0].end, '13:05'); assert.equal(local.changes[0].before, undefined);
+  for (const odd of [
+    'School starts at 9:40 on Mondays except when I have sport',
+    'I finish school at 1:05 every other Tuesday',
+    'School starts at 9:40 on Mondays and it takes 10 minutes by bus and 5 minutes to walk',
+    'Week B school starts at 9:40 but I cannot train on Mondays',
+    'I only train when school finishes early',
+  ]) assert.equal(parseAvailability(odd, { todayIdx: 0, useAB: true }).understood, false, odd);
+});
+
+test('templates, travel and the question survive cleaning; bad ones are refused', async () => {
+  const { cleanChanges, validateChange } = await import('../js/timetable.js');
+  const [c] = cleanChanges([{ op: 'set_times', scope: 'always', match: { type: 'school', day: 0 }, start: '09:40', templates: ['B', 'C', 'B'], before: 10.4, x: 1 }]);
+  assert.deepEqual(c.templates, ['B']); assert.equal(c.before, 10); assert.equal(c.x, undefined);
+  const st = AB();
+  assert.ok(validateChange({ ...c, templates: [] }, st, '2026-11-09').length, 'empty template list is refused');
+  assert.ok(validateChange({ ...c, before: 500 }, st, '2026-11-09').length, 'absurd travel is refused');
+  assert.ok(validateChange(c, { ...st, useAB: false }, '2026-11-09').some((e) => /isn’t switched on/.test(e)));
+});
+
+test('the AI is told about Week A and Week B separately and which one this week is', async () => {
+  const { timetableContext } = await import('../js/timetable.js');
+  const text = timetableContext(AB({ blocks: { A: AB().blocks.A, B: [{ id: 'bx', day: 0, start: '09:40', end: '15:15', type: 'school', label: 'School', before: 10 }] } }), '2026-11-09', 1);
+  assert.match(text, /Week A and Week B timetables are ON\. This week is Week B/);
+  assert.match(text, /Week A commitments:\nMon: School \(school\) 08:45-15:15/);
+  assert.match(text, /Week B commitments:\nMon: School \(school\) 09:40-15:15 travel before 10 min/);
 });
