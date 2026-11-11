@@ -5,7 +5,7 @@ import {
 } from './scheduler.js';
 import { collectHistory, summarise } from './progress.js';
 import { QUESTIONS, EXTRAS, readiness, adjustment, applyAdjustment, extrasText } from './readiness.js';
-import { askCoach, formatReply, STARTERS } from './coach.js';
+import { askCoach, formatReply, STARTERS, commitmentLines, planLines } from './coach.js';
 import {
   weekBlocks, windowFor, dayWindows, parseAvailability, validateChange, applyChanges, describeChange, touchesFixed,
   timetableContext, askTimetable, askTimetablePhotos, BLOCK_TYPES, planWithFlex, appliesTo, SPORT_EFFORTS, sportEffort, photoPlan, PHOTO_MAX_IMAGES,
@@ -3416,6 +3416,28 @@ const GOAL_LABEL = { muscle: 'build muscle', strength: 'get stronger', sport: 'p
 const LEVEL_LABEL = { beginner: 'under a year of lifting', intermediate: '1 to 3 years of lifting', advanced: 'more than 3 years of lifting' };
 const EQUIP_LABEL = { gym: 'a full gym', home: 'a home gym (dumbbells, bench, pull-up bar)', bodyweight: 'no equipment' };
 
+// Next week for the coach: the real commitments (Week A/B, repeats and one-offs) and the draft plan Slotted's planner makes around them.
+// The draft is computed here, never by the AI, and nothing is saved.
+function nextWeekLines(key) {
+  const nk = addWeeks(key, 1);
+  const out = [`Next week (starts ${DAYS[0]} ${fmtDate(keyToDate(nk))}${state.useAB ? `, Week ${typeOf(nk)}` : ''}):`];
+  const cm = commitmentLines(weekBlocks(state, nk));
+  out.push(...(cm.length ? cm : ['No school, sport or other commitments are set for next week.']));
+  const e = (state.history || {})[nk] || {};
+  const skip = [...new Set([...(e.skipDays || []), ...(state.restDays || [])])];
+  if (skip.length) out.push(`Days they won't train next week: ${skip.map((d) => DAYS_SHORT[d]).join(', ')}.`);
+  let plan = e.plan;
+  let warnings = e.warnings || [];
+  if (!plan || !plan.length) {
+    const res = planWithFlex(state.profile, weekBlocks(state, nk), state.window, { busy: e.busy, skipDays: skip, keys: keysFor(nk, e.busy), keepOrder: keepOrder(), dayWindows: dayWindows(state, nk) });
+    plan = res.sessions; warnings = res.warnings || [];
+  }
+  out.push(plan.length ? "Slotted's planner draft for next week, already fitted around those commitments:" : 'Slotted could not fit any gym session next week around those commitments.');
+  out.push(...planLines(plan));
+  if (warnings.length) out.push(`Planner notes: ${warnings.map((w) => w.text).join(' ')}`);
+  return out;
+}
+
 // A compact summary of the athlete for the coach. Only what they've told the app, and never Strava data.
 function coachContext() {
   const ctx = weekCtx();
@@ -3429,12 +3451,7 @@ function coachContext() {
     ? `Follows their own routine: ${state.routine.workouts.map((w) => `${w.name} (${w.exercises.map((e) => e.name).filter(Boolean).join(', ')})`).join('; ')}.`
     : `Follows Slotted's suggested plan: ${SPLIT_NAMES[p.sessionsPerWeek]}.`);
   if ((state.restDays || []).length) lines.push(`Preferred rest days: ${state.restDays.map((d) => DAYS[d]).join(', ')}.`);
-  const sport = blocksFor(key).filter((b) => b.type === 'sport');
-  if (sport.length) lines.push(`Sport this week: ${sport.map((b) => `${DAYS_SHORT[b.day]} ${b.label} (${b.intensity === 'hard' ? 'game, full effort' : b.intensity === 'easy' ? 'easy session, minimal effort' : 'training, moderate effort'})`).join(', ')}.`);
-  const other = blocksFor(key).filter((b) => b.type === 'work' || b.type === 'other');
-  if (other.length) lines.push(`Other commitments: ${other.map((b) => `${DAYS_SHORT[b.day]} ${b.label} ${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}${b.flex ? ' (flexible)' : ''}${b.once ? ' (this week only)' : ''}`).join(', ')}.`);
-  const school = blocksFor(key).filter((b) => b.type === 'school');
-  if (school.length) lines.push(`School: ${school.map((b) => `${DAYS_SHORT[b.day]} ${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}${b.once ? ' (this week only)' : ''}`).join(', ')}.`);
+  lines.push(...commitmentLines(blocksFor(key), ' this week'));
   if (entry.busy) lines.push('They marked this a busy week.');
   lines.push(`Sessions done this week: ${ctx.counted} of ${ctx.target}${ctx.credit ? ' (one counted from sport)' : ''}.`);
   lines.push('This week\'s sessions:');
@@ -3455,6 +3472,7 @@ function coachContext() {
   // The app's own suggestions (from logged training and check-ins only; never Strava). The coach can explain them; the athlete accepts them on This week.
   const sugg = weekProposals(ctx, { withStrava: false }).proposals;
   if (sugg.length) lines.push(`Suggested changes the app is showing on This week (waiting for the athlete to accept or decline): ${sugg.map((p) => `${p.title}. ${p.reason}`).join(' | ')}`);
+  lines.push(...nextWeekLines(key));
   const streak = streakInfo(state.history, key, targetFor, templateSport);
   const cons = consistency(data, key, 8, { targetFor, sportCreditFor: templateSport });
   lines.push(`Weekly streak: ${streak.current} weeks (longest ${streak.longest}).${cons.weeksJudged ? ` Weekly target hit in ${cons.weeksMet} of the last ${cons.weeksJudged} finished weeks.` : ''}`);
