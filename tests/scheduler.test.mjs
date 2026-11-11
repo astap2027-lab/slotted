@@ -237,3 +237,35 @@ test('a mixed week puts sessions before school on sailing days and never over a 
     if (s.day === 1 || s.day === 3) assert.equal(hhmm(s.start), '07:00');
   }
 });
+
+// ---------- mix: a late school start means a free morning ----------
+test('mix: on days school starts late, train before school even when the afternoon is free', () => {
+  const late = [0, 2].map((day) => ({ day, start: '09:40', end: '15:15', type: 'school', label: 'School', before: 10 }));
+  const normal = [1, 3, 4].map((day) => ({ day, start: '08:45', end: '15:15', type: 'school', label: 'School' }));
+  const blocks = [...late, ...normal];
+  for (const day of [0, 2]) {
+    const s = bestSlot(blocks, day, win, 60, 'mix');
+    assert.ok(!s.short && s.end <= toMin('09:15'), `day ${day} before school, got ${hhmm(s.start)}`);
+    assert.ok(s.start >= toMin('07:00'), `not absurdly early, got ${hhmm(s.start)}`);
+  }
+  for (const day of [1, 3, 4]) {
+    const s = bestSlot(blocks, day, win, 60, 'mix');
+    assert.ok(s.start >= toMin('15:30'), `day ${day} after school, got ${hhmm(s.start)}`);
+  }
+  // The other preferences are unchanged: afternoon still picks after school on a late-start day.
+  assert.ok(bestSlot(blocks, 0, win, 60, 'afternoon').start >= toMin('15:30'));
+});
+
+test('mix: a full week with two late starts puts those sessions in the morning', () => {
+  const late = [0, 2].map((day) => ({ day, start: '09:40', end: '15:15', type: 'school', label: 'School' }));
+  const normal = [1, 3, 4].map((day) => ({ day, start: '08:45', end: '15:15', type: 'school', label: 'School' }));
+  const res = planWeek(profile(3, { timeOfDay: 'mix' }), [...late, ...normal], win);
+  const mornings = res.sessions.filter((s) => s.start < toMin('09:15'));
+  assert.ok(mornings.length >= 1, 'at least one session lands in a free morning');
+  for (const s of res.sessions) if (s.day === 0 || s.day === 2) assert.ok(s.start < toMin('09:15'), `${s.name} on a late-start day is before school`);
+});
+
+test('mix: a day with nothing on is not treated as a free morning', () => {
+  const s = bestSlot([], 5, win, 60, 'mix');
+  assert.ok(s.start >= toMin('15:00') && s.start < toMin('18:00'), `got ${hhmm(s.start)}`);
+});

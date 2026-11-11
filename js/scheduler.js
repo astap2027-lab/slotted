@@ -288,8 +288,12 @@ const ANCHORS = [16 * 60, 9 * 60, 17 * 60, 10 * 60, 7 * 60, 18 * 60, 18 * 60 + 3
 export function bestSlot(blocks, day, window, length, when = 'afternoon') {
   const gaps = freeGaps(blocks, day, window);
   let best = null;
+  // A free morning (school or work starts late, so the gap before it ends between about 9:15am and noon; a day with nothing on isn't one). With "mix" that day's
+  // best time is before school, even if the afternoon is free too.
+  const freeMorning = when === 'mix' && gaps.some(([a, b]) => a <= toMin(window.start) && b >= 9 * 60 + 15 && b <= 12 * 60 && b - a >= length);
   const consider = (start, len, short) => {
-    const pref = timePref(start, when) + (short ? 10 : 0);
+    const morning = start >= 7 * 60 && start < 9 * 60;
+    const pref = timePref(start, when) + (short ? 10 : 0) - (freeMorning && morning && !short ? 0.6 : 0);
     if (!best || pref < best.pref || (pref === best.pref && start < best.start)) {
       best = { start, end: start + len, short, pref };
     }

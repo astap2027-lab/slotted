@@ -7,6 +7,7 @@ export const COACH_INSTRUCTIONS = `You are the coach inside Slotted, a gym plann
 
 How to answer:
 - Use the athlete's data provided with each question: their plan, this week, next week, today's check-in and recent lifts. Refer to specific numbers and days when they help. Never invent data they haven't logged.
+- If the draft puts sessions after school but a day has a long free morning (for example school starts late, so there is time before it), say so and suggest a morning time. Any time you suggest must sit inside the "Free windows" listed for that day, allow for travel, and be offered as a suggestion they can apply with Move to another day or time (or by telling Slotted). Mention which draft times are the planner's and which are your ideas. Use each commitment's name (for example "O Group" or "Cadets"), never "something".
 - For questions about next week, use the "Next week" section: their real school, sport and other commitments, and the draft plan Slotted's planner made around them (those times already avoid their commitments). Explain or adjust that draft, and keep every sport or work commitment in mind (hard sport days are not leg days). Never invent times or treat a day as free when the data shows a commitment. If something looks missing, say so and point them to My week or the "Tell Slotted about a change" box. Take today's weekday and date from the "Today" line.
 - Be practical and short: a few short paragraphs or a short list. Plain language, Australian spelling, and the same weight units as their data (kg or lb).
 - On a bad week, help them do something sensible rather than nothing: lighter sessions, fewer sets, shorter workouts, an extra rest day, sleep and food basics.
@@ -31,12 +32,23 @@ export function commitmentLines(blocks, when = '') {
   const tags = (b) => `${b.flex ? ' (flexible)' : ''}${b.once ? ' (this week only)' : ''}`;
   const lines = [];
   const sport = list.filter((b) => b.type === 'sport');
-  if (sport.length) lines.push(`Sport${when}: ${sport.map((b) => `${at(b)} ${b.label} (${EFFORT_WORDS[b.intensity] || 'training, moderate effort'})${tags(b)}`).join(', ')}.`);
+  if (sport.length) lines.push(`Sport${when}: ${sport.map((b) => `${at(b)} ${b.label || 'Sport'} (${EFFORT_WORDS[b.intensity] || 'training, moderate effort'})${tags(b)}`).join(', ')}.`);
   const other = list.filter((b) => b.type === 'work' || b.type === 'other');
-  if (other.length) lines.push(`Other commitments${when}: ${other.map((b) => `${at(b)} ${b.label}${tags(b)}`).join(', ')}.`);
+  if (other.length) lines.push(`Other commitments${when}: ${other.map((b) => `${at(b)} ${b.label || 'Other'}${tags(b)}`).join(', ')}.`);
   const school = list.filter((b) => b.type === 'school');
   if (school.length) lines.push(`School${when}: ${school.map((b) => `${at(b)}${tags(b)}`).join(', ')}.`);
   return lines;
+}
+
+// Free time for a gym session each day, from the app's own free-gap calculation (training hours minus commitments and
+// travel). days: one list of [startMin, endMin] gaps per weekday; only gaps of at least minLen minutes are listed.
+export function windowLines(days, minLen = 45) {
+  const out = [];
+  (days || []).forEach((gaps, d) => {
+    const ok = (gaps || []).filter(([a, b]) => b - a >= minLen);
+    out.push(`${DAYS_SHORT[d]}: ${ok.length ? ok.map(([a, b]) => `${fmtTime(a)} to ${fmtTime(b)}`).join(', ') : 'nothing long enough'}`);
+  });
+  return out;
 }
 
 // Planned sessions as short lines (day, start time, name and the planner's notes), without exercises.

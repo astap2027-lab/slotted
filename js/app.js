@@ -5,7 +5,7 @@ import {
 } from './scheduler.js';
 import { collectHistory, summarise } from './progress.js';
 import { QUESTIONS, EXTRAS, readiness, adjustment, applyAdjustment, extrasText } from './readiness.js';
-import { askCoach, formatReply, STARTERS, commitmentLines, planLines } from './coach.js';
+import { askCoach, formatReply, STARTERS, commitmentLines, planLines, windowLines } from './coach.js';
 import {
   weekBlocks, windowFor, dayWindows, parseAvailability, validateChange, applyChanges, describeChange, touchesFixed,
   timetableContext, askTimetable, askTimetablePhotos, BLOCK_TYPES, planWithFlex, appliesTo, SPORT_EFFORTS, sportEffort, photoPlan, PHOTO_MAX_IMAGES,
@@ -3490,6 +3490,9 @@ function nextWeekLines(key) {
     const res = planWithFlex(state.profile, weekBlocks(state, nk), state.window, { busy: e.busy, skipDays: skip, keys: keysFor(nk, e.busy), keepOrder: keepOrder(), dayWindows: dayWindows(state, nk) });
     plan = res.sessions; warnings = res.warnings || [];
   }
+  const sessionLen = Number(state.profile.sessionLength) || 60;
+  out.push(`Free windows next week where a ${sessionLen} minute gym session fits (training hours minus commitments and travel):`);
+  out.push(...windowLines(DAYS.map((_, d) => freeGaps(weekBlocks(state, nk), d, windowFor(state, nk, d))), sessionLen));
   out.push(plan.length ? "Slotted's planner draft for next week, already fitted around those commitments:" : 'Slotted could not fit any gym session next week around those commitments.');
   out.push(...planLines(plan));
   if (warnings.length) out.push(`Planner notes: ${warnings.map((w) => w.text).join(' ')}`);
