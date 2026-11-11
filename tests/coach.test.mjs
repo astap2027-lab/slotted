@@ -86,3 +86,38 @@ test('a declined question gets a helpful redirect, not an empty reply', async ()
   const res = await onRequestPost({ request: req({ messages: [{ role: 'user', content: 'q' }] }), env: { ANTHROPIC_API_KEY: 'k' } });
   assert.match((await res.json()).text, /Ask me about your training/);
 });
+
+import { commitmentLines, planLines, COACH_INSTRUCTIONS } from '../js/coach.js';
+
+test('commitment lines list sport with effort, school, work and tags', () => {
+  const blocks = [
+    { day: 3, start: '16:00', end: '18:00', type: 'sport', label: 'Sailing', intensity: 'easy' },
+    { day: 1, start: '16:00', end: '18:00', type: 'sport', label: 'Rugby', intensity: 'hard' },
+    { day: 2, start: '16:00', end: '17:00', type: 'sport', label: 'Gym club', intensity: 'light', flex: true },
+    { day: 0, start: '08:45', end: '15:15', type: 'school', label: 'School' },
+    { day: 4, start: '15:30', end: '18:00', type: 'other', label: 'Cadets', once: true },
+  ];
+  const text = commitmentLines(blocks, ' next week').join('\n');
+  assert.match(text, /Sport next week: Tue 4pm to 6pm Rugby \(game, full effort\), Wed 4pm to 5pm Gym club \(training, moderate effort\) \(flexible\), Thu 4pm to 6pm Sailing \(easy session, minimal effort\)/);
+  assert.match(text, /School next week: Mon 8:45am to 3:15pm/);
+  assert.match(text, /Other commitments next week: Fri 3:30pm to 6pm Cadets \(this week only\)/);
+  assert.deepEqual(commitmentLines([]), []);
+});
+
+test('plan lines show day, times, name and planner notes only', () => {
+  const lines = planLines([
+    { day: 3, start: 420, end: 480, name: 'Chest and back', notes: ['Sailing today'], exercises: [{ name: 'Bench press' }] },
+    { day: 0, start: 930, end: 990, name: 'Legs', notes: [] },
+  ]);
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /^- Mon 3:30pm to 4:30pm Legs$/);
+  assert.match(lines[1], /^- Thu 7am to 8am Chest and back \(Sailing today\)$/);
+  assert.ok(!lines.join('').includes('Bench'));
+});
+
+test('the coach is told to use next week and never invent times, and the safety rules remain', () => {
+  assert.match(COACH_INSTRUCTIONS, /"Next week" section/);
+  assert.match(COACH_INSTRUCTIONS, /Never invent times/);
+  assert.match(COACH_INSTRUCTIONS, /physio or GP/);
+  assert.match(COACH_INSTRUCTIONS, /calorie targets/);
+});
