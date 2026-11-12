@@ -153,3 +153,10 @@ test('at most two morning questions at once', () => {
   const sessions = [pm({ key: 'a' }), pm({ key: 'b', day: 2 }), pm({ key: 'c', day: 2 })];
   assert.equal(proposeMornings(mo({ sessions })).proposals.length, 2);
 });
+
+test('a mid-morning appointment on a free day is not a "free morning"; a late work start is', () => {
+  const dentist = [{ day: 5, start: '10:00', end: '11:00', type: 'other', label: 'Dentist' }];
+  assert.equal(morningSlot(dentist, 5, W, 60), null);
+  const work = [{ day: 5, start: '10:00', end: '14:00', type: 'work', label: 'Shift' }];
+  assert.equal(morningSlot(work, 5, W, 60).start, 420);
+});

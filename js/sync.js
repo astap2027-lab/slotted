@@ -44,6 +44,8 @@ export function mergeStates(local, server) {
     if (o.reports || n.reports) n.reports = { ...(o.reports || {}), ...(n.reports || {}) };
     if (o.dismissed || n.dismissed) n.dismissed = union(n.dismissed, o.dismissed);
     if (!n.plan && o.plan) n.plan = clone(o.plan);
+    // Commitments read from a connected calendar: the newer copy wins; keep the other's if the newer has none.
+    if (!n.cal && o.cal) n.cal = clone(o.cal);
   }
 
   out.log = clone(newer.log || {});

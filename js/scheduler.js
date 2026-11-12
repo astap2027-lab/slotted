@@ -284,7 +284,7 @@ function timePref(t, when = 'afternoon') {
 
 const ANCHORS = [16 * 60, 9 * 60, 17 * 60, 10 * 60, 7 * 60, 18 * 60, 18 * 60 + 30, 19 * 60, 6 * 60 + 30];
 
-// A free morning: the gap at the start of the day (before the first commitment) ends between 9:15am and noon and is
+// A free morning: school or work starts late, so the gap at the start of the day ends between 9:15am and noon and is
 // long enough for a session. Returns where a session could go (7am if it fits, else from the start of the gap) and
 // what the first commitment is, or null.
 export function morningSlot(blocks, day, window, length) {
@@ -295,6 +295,8 @@ export function morningSlot(blocks, day, window, length) {
   const start = a <= 7 * 60 && 7 * 60 + length <= b ? 7 * 60 : a;
   if (start < 6 * 60 + 30 || start + length > b) return null;
   const first = blocks.filter((x) => x.day === day).sort((x, y) => toMin(x.start) - toMin(y.start))[0];
+  // Only a late start to school or work makes a "free morning"; a mid-morning appointment on a free day doesn't.
+  if (!first || !['school', 'work'].includes(first.type)) return null;
   return { start, end: start + length, until: b, first: first ? { start: toMin(first.start), label: first.label, type: first.type, before: Number(first.before) || 0 } : null };
 }
 
@@ -304,7 +306,7 @@ export function bestSlot(blocks, day, window, length, when = 'afternoon') {
   let best = null;
   // A free morning (school or work starts late, so the gap before it ends between about 9:15am and noon; a day with nothing on isn't one). With "mix" that day's
   // best time is before school, even if the afternoon is free too.
-  const freeMorning = when === 'mix' && gaps.some(([a, b]) => a <= toMin(window.start) && b >= 9 * 60 + 15 && b <= 12 * 60 && b - a >= length);
+  const freeMorning = when === 'mix' && !!morningSlot(blocks, day, window, length);
   const consider = (start, len, short) => {
     const morning = start >= 7 * 60 && start < 9 * 60;
     const pref = timePref(start, when) + (short ? 10 : 0) - (freeMorning && morning && !short ? 0.6 : 0);
