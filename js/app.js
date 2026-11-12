@@ -9,7 +9,9 @@ import { askCoach, formatReply, STARTERS, commitmentLines, planLines, windowLine
 import {
   weekBlocks, windowFor, dayWindows, parseAvailability, validateChange, applyChanges, describeChange, touchesFixed,
   timetableContext, askTimetable, askTimetablePhotos, BLOCK_TYPES, planWithFlex, appliesTo, SPORT_EFFORTS, sportEffort, photoPlan, PHOTO_MAX_IMAGES,
+  calendarBlocks, calendarDiff, CAL_TYPES, ruleKey, guessType, guessEffort,
 } from './timetable.js';
+import { eventsBetween, parseICS, calendarUrl } from './ical.js';
 import { proposeChanges, proposeMornings, applyProposal } from './adjust.js';
 import { load, save, exportJSON, importJSON, reset, defaultState } from './store.js';
 import { mergeStates, forUpload } from './sync.js';
@@ -102,7 +104,7 @@ const MUSCLE_LABEL = Object.fromEntries(MUSCLES.map((m) => [m.id, m.label]));
 const fmtNum = (n) => Math.round(n).toLocaleString('en-AU');
 const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 // The release number. It must match CACHE in sw.js (a test checks); shown at the bottom of Settings.
-const APP_VERSION = 32;
+const APP_VERSION = 33;
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const subnav = (cur) => `<nav class="subnav" aria-label="Training">${[['plan', 'This week'], ['week', 'My week'], ['routine', 'Routine'], ['library', 'Library']]
   .map(([v, t]) => `<a href="#${v}" ${v === cur ? 'aria-current="page"' : ''}>${t}</a>`).join('')}</nav>`;
@@ -556,6 +558,7 @@ function renderWeek() {
     </div>
     <div class="stack">
       ${availHtml()}
+      ${calendarCard()}
       ${oneOffCard()}
       ${hasSchool ? '' : `
       <section class="card stack">
@@ -626,6 +629,7 @@ function renderWeek() {
   app.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => { editingWeek = b.dataset.tab; editingBlock = null; renderWeek(); }));
   wireAvail(renderWeek);
   wireWeekExtras();
+  wireCalendarCard();
   app.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => {
     state.blocks[editingWeek] = state.blocks[editingWeek].filter((x) => x.id !== b.dataset.del);
     commit(); renderWeek();
@@ -1282,6 +1286,279 @@ function recapCard(key, nextUp, count) {
 }
 
 
+// ---------- connected calendars ----------
+// Google, Apple/iCloud, Outlook and school apps share calendars as iCal links. The server reads the link
+// (/api/calendar/fetch); app logic turns this week's and next week's events into commitments (history[week].cal),
+// replans, and says what changed with an Undo. Nothing here uses the AI.
+let calTexts = {}; // calendar id -> the text last read (kept only while the page is open)
+let calBusy = false;
+let calNotice = null; // { lines, more, undo }
+let editingCal = null; // the imported commitment open for editing on My week
+const CAL_CHECK_MS = 15 * 60 * 1000;
+const calList = () => (state.calendars || []).filter((c) => c && c.url);
+const CAL_ERRORS = {
+  offline: 'You’re offline, so Slotted couldn’t read it.',
+  not_found: 'That link didn’t work. It may have been changed or turned off.',
+  bad_url: 'That doesn’t look like a calendar link. It should start with https:// or webcal://.',
+  not_calendar: 'That link opened a web page, not a calendar. Copy the iCal or calendar feed link instead.',
+  too_big: 'That calendar is too big to read.',
+  timeout: 'The calendar took too long to answer.',
+  rate_limited: 'Too many checks today. Slotted will try again tomorrow.',
+  unreachable: 'Couldn’t reach that calendar right now. Slotted will try again later.',
+};
+
+async function readCalendar(url) {
+  let res;
+  try {
+    res = await fetch('/api/calendar/fetch', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url: calendarUrl(url) }) });
+  } catch { return { error: 'offline' }; }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || typeof data.text !== 'string') return { error: data.error || (res.status === 404 ? 'not_found' : 'unreachable') };
+  return { text: data.text };
+}
+
+// This week's and next week's calendar commitments from what has been read. A calendar not read this time keeps
+// what it had, so a failed read never wipes anything.
+function calendarWeeks(texts) {
+  const key = currentWeek();
+  const weeks = [key, addWeeks(key, 1)];
+  const from = keyToDate(key).getTime();
+  const to = keyToDate(addWeeks(key, 2)).getTime();
+  const out = Object.fromEntries(weeks.map((wk) => [wk, []]));
+  for (const c of calList()) {
+    const text = texts[c.id];
+    if (text === undefined) {
+      for (const wk of weeks) out[wk].push(...(((state.history[wk] || {}).cal) || []).filter((b) => b.calId === c.id));
+      continue;
+    }
+    const evs = eventsBetween(text, from, to);
+    let n = 0;
+    for (const wk of weeks) { const list = calendarBlocks(evs, c, state.calendarRules || {}, wk); n += list.length; out[wk].push(...list); }
+    c.lastCount = n;
+  }
+  return out;
+}
+
+const calSig = (blocks) => {
+  const t = JSON.stringify((blocks || []).map((b) => [b.id, b.start, b.end, b.type, b.intensity, b.flex]));
+  let h = 0;
+  for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0;
+  return String(h);
+};
+
+// Save new calendar commitments, replan the rest of this week, and remember what changed (with an Undo).
+function applyCalendarWeeks(next, { quiet = false } = {}) {
+  const key = currentWeek();
+  const prev = {};
+  const sigs = {};
+  const lines = [];
+  for (const [wk, blocks] of Object.entries(next)) {
+    const e = (state.history[wk] = state.history[wk] || {});
+    const before = e.cal || [];
+    if (JSON.stringify(before) === JSON.stringify(blocks)) continue;
+    const sig = calSig(blocks);
+    if (e.calHold === sig) continue; // they undid exactly this; wait until the calendar changes again
+    prev[wk] = before; sigs[wk] = sig;
+    lines.push(...calendarDiff(before, blocks).map((l) => (wk === key ? l : `${l}, next week`)));
+    if (blocks.length) e.cal = blocks; else delete e.cal;
+    delete e.calHold;
+  }
+  if (!Object.keys(prev).length) return false;
+  const entry = state.history[key];
+  const planBefore = entry && entry.plan ? JSON.parse(JSON.stringify(entry.plan)) : null;
+  if (planBefore) replan(key);
+  commit();
+  if (!quiet && lines.length) calNotice = { lines: lines.slice(0, 8), more: Math.max(0, lines.length - 8), undo: { prev, sigs, planBefore } };
+  return true;
+}
+
+function undoCalendar() {
+  const n = calNotice;
+  if (!n) return;
+  const key = currentWeek();
+  for (const [wk, before] of Object.entries(n.undo.prev)) {
+    const e = (state.history[wk] = state.history[wk] || {});
+    if (before.length) e.cal = before; else delete e.cal;
+    e.calHold = n.undo.sigs[wk];
+  }
+  if (n.undo.planBefore && state.history[key]) { state.history[key].plan = n.undo.planBefore; state.history[key].inputs = planInputs(key); }
+  calNotice = null;
+  commit(); route();
+  toast('Calendar change undone');
+}
+
+// Read every connected calendar (at most every 15 minutes unless asked), then apply what changed.
+async function syncCalendars({ force = false, after = null } = {}) {
+  const cals = calList();
+  if (!cals.length || calBusy || !state.setupDone) return;
+  if (!force && Object.keys(calTexts).length && Date.now() - (state.calendarCheckedAt || 0) < CAL_CHECK_MS) return;
+  calBusy = true;
+  if (after) after();
+  try {
+    const results = await Promise.all(cals.map((c) => readCalendar(c.url)));
+    cals.forEach((c, i) => {
+      const r = results[i];
+      if (r.text !== undefined) { calTexts[c.id] = r.text; c.lastSync = Date.now(); c.error = ''; } else { c.error = r.error; c.errorAt = Date.now(); }
+    });
+    if (force) for (const wk of [currentWeek(), addWeeks(currentWeek(), 1)]) if (state.history[wk]) delete state.history[wk].calHold;
+    state.calendarCheckedAt = Date.now();
+    const changed = applyCalendarWeeks(calendarWeeks(calTexts));
+    if (!changed) commit();
+    calBusy = false;
+    if (after) after();
+    else if (changed && viewName() !== 'workout') route();
+  } finally { calBusy = false; }
+}
+
+const calAgo = (t) => { const m = Math.round((Date.now() - t) / 60000); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : `at ${new Date(t).toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' })}`; };
+
+function calendarsPanel() {
+  const cals = calList();
+  return `<section class="card stack" id="calendars-card">
+    <h2>Calendars</h2>
+    <p class="muted small">Connect Google Calendar, Apple Calendar or your school app. Slotted reads it whenever you open the app, plans your gym sessions around what’s on, and tells you what changed.</p>
+    ${cals.length ? `<ul class="cal-list">${cals.map((c) => `<li>
+      <div><b>${esc(c.name)}</b>
+        <small class="muted">${esc(CAL_TYPES[c.type] || CAL_TYPES.auto)}${c.allDayBlocks ? '. All-day events block the day' : ''}</small>
+        <small class="${c.error ? 'note-warn' : 'muted'}">${c.error ? esc(CAL_ERRORS[c.error] || CAL_ERRORS.unreachable) : c.lastSync ? `Read ${calAgo(c.lastSync)}${c.lastCount !== undefined ? `. ${plural(c.lastCount, 'commitment')} this week and next` : ''}` : 'Not read yet'}</small></div>
+      <button type="button" class="ghost danger" data-calrm="${esc(c.id)}" aria-label="Remove ${esc(c.name)}">Remove</button>
+    </li>`).join('')}</ul>
+    <div class="actions"><button type="button" id="cal-check" ${calBusy ? 'disabled' : ''}>${calBusy ? 'Checking…' : 'Check now'}</button></div>` : ''}
+    <form id="cal-add" class="stack" novalidate>
+      <div class="field"><label for="cal-url">Calendar link</label><input id="cal-url" name="url" type="url" inputmode="url" autocomplete="off" placeholder="https://… or webcal://…"></div>
+      <div class="row">
+        <div class="field"><label for="cal-name">Name</label><input id="cal-name" name="name" type="text" maxlength="30" placeholder="Google, School…"></div>
+        <div class="field"><label for="cal-type">What’s in it</label><select id="cal-type" name="type">${Object.entries(CAL_TYPES).map(([v, t]) => `<option value="${v}">${esc(t)}</option>`).join('')}</select></div>
+      </div>
+      <label class="chip"><input type="checkbox" name="allday" value="1"><span>All-day events mean I can’t train</span></label>
+      <p class="errors" id="cal-err" role="alert"></p>
+      <div class="actions"><button type="submit" class="primary">Add calendar</button></div>
+    </form>
+    <details class="cal-help"><summary>Where do I find my calendar link?</summary>
+      <ul class="small">
+        <li><b>Google Calendar</b>, on a computer: Settings, choose the calendar on the left, then Integrate calendar. Copy <i>Secret address in iCal format</i>.</li>
+        <li><b>Apple Calendar</b> on iPhone: Calendars, tap ⓘ next to the calendar, turn on Public Calendar, then Share Link. On a Mac: right-click the calendar, Share Calendar, tick Public Calendar.</li>
+        <li><b>School apps</b> (Compass, SEQTA, Sentral and others): look for Subscribe, iCal, Calendar feed or Export on the calendar or timetable page.</li>
+        <li><b>Outlook</b>: Settings, Calendar, Shared calendars, Publish a calendar, then copy the ICS link.</li>
+      </ul>
+      <p class="small muted">Pick <i>School timetable</i> for a school app: its classes become one School block a day (study periods don’t count), replacing your typed-in school times on those days.</p>
+    </details>
+    <p class="muted small">A calendar link works like a password: anyone with it can see that calendar. It’s saved with your Slotted data, and event names are shared with the coach when you ask it something. Remove it here any time.</p>
+  </section>`;
+}
+
+function wireCalendars() {
+  const form = document.getElementById('cal-add');
+  if (!form) return;
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const f = new FormData(form);
+    const url = calendarUrl(f.get('url'));
+    const err = document.getElementById('cal-err');
+    if (!/^https:\/\/[^\s/]+\.[^\s]+/i.test(url)) { err.textContent = CAL_ERRORS.bad_url; return; }
+    if (calList().some((c) => calendarUrl(c.url) === url)) { err.textContent = 'That calendar is already connected.'; return; }
+    const btn = form.querySelector('button[type=submit]');
+    btn.disabled = true; btn.textContent = 'Checking the link…'; err.textContent = '';
+    const r = await readCalendar(url);
+    if (r.error) { btn.disabled = false; btn.textContent = 'Add calendar'; err.textContent = CAL_ERRORS[r.error] || CAL_ERRORS.unreachable; return; }
+    const name = (String(f.get('name') || '').trim() || parseICS(r.text).name || 'Calendar').slice(0, 30);
+    const c = { id: `c${uid()}`, name, url, type: CAL_TYPES[f.get('type')] ? f.get('type') : 'auto', allDayBlocks: f.get('allday') === '1', lastSync: Date.now(), error: '' };
+    state.calendars = [...(state.calendars || []), c];
+    calTexts[c.id] = r.text;
+    applyCalendarWeeks(calendarWeeks(calTexts));
+    commit(); renderSettings(); renderSideWeek();
+    toast(`${name} connected`);
+  });
+  app.querySelectorAll('[data-calrm]').forEach((b) => b.addEventListener('click', () => {
+    const id = b.dataset.calrm;
+    state.calendars = (state.calendars || []).filter((c) => c.id !== id);
+    delete calTexts[id];
+    applyCalendarWeeks(calendarWeeks(calTexts), { quiet: true });
+    commit(); renderSettings(); renderSideWeek();
+    toast('Calendar removed');
+  }));
+  const check = document.getElementById('cal-check');
+  if (check) check.addEventListener('click', () => syncCalendars({ force: true, after: () => { if (viewName() === 'profile') renderSettings(); } }));
+}
+
+// My week: what came from calendars this week and next, with a way to say how Slotted should treat each event.
+function calendarCard() {
+  if (!calList().length) return '';
+  const key = currentWeek();
+  const rows = [];
+  for (const wk of [key, addWeeks(key, 1)]) for (const b of ((state.history[wk] || {}).cal || [])) rows.push({ wk, b });
+  const when = (b) => (b.start === '00:00' && b.end === '23:59' ? 'all day' : `${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}`);
+  return `<section class="card stack" aria-labelledby="calc-h">
+    <div class="card-head"><h2 id="calc-h">From your calendars</h2><a href="#profile">Calendars</a></div>
+    ${rows.length ? `<ul class="cal-rows">${rows.map(({ wk, b }) => {
+      const rule = (state.calendarRules || {})[ruleKey(b.label)] || {};
+      const open = editingCal === b.id;
+      return `<li>
+        <button type="button" class="cal-row" data-caledit="${esc(b.id)}" aria-expanded="${open}" ${b.merged ? 'disabled' : ''}>
+          <span><b>${esc(b.label)}</b> ${wk === key ? '' : 'next '}${DAYS[b.day]}, ${when(b)}</span>
+          <small class="muted">${esc(BLOCK_TYPES[b.type] || 'Other')}${b.type === 'sport' ? `, ${esc(SPORT_EFFORTS[sportEffort(b.intensity)].label.toLowerCase())}` : ''}${b.flex ? ', flexible' : ''}${b.merged ? `, ${plural(b.classes, 'class', 'classes')} from ${esc(b.calName || 'your school calendar')}` : ''}</small>
+        </button>
+        ${open ? `<form class="cal-rule stack" data-calrule="${esc(b.label)}">
+          <p class="small muted">For every event called “${esc(b.label)}”:</p>
+          <div class="row">
+            <div class="field"><label for="cr-type">Type</label><select id="cr-type" name="type">${Object.entries(BLOCK_TYPES).map(([v, t]) => `<option value="${v}" ${(rule.type || b.type) === v ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
+            <div class="field"><label for="cr-int">If it’s sport</label><select id="cr-int" name="intensity">${Object.entries(SPORT_EFFORTS).map(([v, t]) => `<option value="${v}" ${(rule.intensity || b.intensity || 'light') === v ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></div>
+          </div>
+          <label class="chip"><input type="checkbox" name="flex" value="1" ${rule.flex || b.flex ? 'checked' : ''}><span>Flexible (can move if the week is too full)</span></label>
+          <label class="chip"><input type="checkbox" name="ignore" value="1"><span>Ignore events called “${esc(b.label)}”</span></label>
+          <div class="actions"><button type="submit" class="primary">Save</button><button type="button" class="ghost" data-calclose>Cancel</button></div>
+        </form>` : ''}
+      </li>`;
+    }).join('')}</ul>` : '<p class="small muted">Nothing from your calendars this week or next.</p>'}
+    ${(state.calendarRules && Object.values(state.calendarRules).some((r) => r.ignore)) ? `<p class="small muted">Ignoring: ${Object.entries(state.calendarRules).filter(([, r]) => r.ignore).map(([k]) => `<button type="button" class="linkish" data-calunignore="${esc(k)}">${esc(k)} ×</button>`).join(' ')}</p>` : ''}
+  </section>`;
+}
+
+function wireCalendarCard() {
+  app.querySelectorAll('[data-caledit]').forEach((b) => b.addEventListener('click', () => { editingCal = editingCal === b.dataset.caledit ? null : b.dataset.caledit; renderWeek(); }));
+  app.querySelectorAll('[data-calclose]').forEach((b) => b.addEventListener('click', () => { editingCal = null; renderWeek(); }));
+  const reapply = () => {
+    if (calList().every((c) => calTexts[c.id] !== undefined)) applyCalendarWeeks(calendarWeeks(calTexts), { quiet: true });
+    else syncCalendars({ force: true, after: () => { if (viewName() === 'week') renderWeek(); } });
+    editingCal = null; commit(); renderWeek(); renderSideWeek();
+  };
+  app.querySelectorAll('[data-calrule]').forEach((form) => form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const f = new FormData(form);
+    const type = f.get('type');
+    state.calendarRules = { ...(state.calendarRules || {}), [ruleKey(form.dataset.calrule)]: {
+      type: BLOCK_TYPES[type] ? type : 'other',
+      ...(type === 'sport' ? { intensity: sportEffort(f.get('intensity')) } : {}),
+      ...(f.get('flex') ? { flex: true } : {}),
+      ...(f.get('ignore') ? { ignore: true } : {}),
+    } };
+    reapply();
+    toast(f.get('ignore') ? `Ignoring “${form.dataset.calrule}”` : 'Saved for every event with that name');
+  }));
+  app.querySelectorAll('[data-calunignore]').forEach((b) => b.addEventListener('click', () => {
+    const rules = { ...(state.calendarRules || {}) };
+    delete rules[b.dataset.calunignore];
+    state.calendarRules = rules;
+    reapply();
+  }));
+}
+
+function calNoticeCard() {
+  if (!calNotice) return '';
+  return `<section class="card cal-notice" role="status" aria-labelledby="caln-h">
+    <div class="card-head"><h2 id="caln-h">Your calendar changed</h2><span class="label">Plan updated</span></div>
+    <ul class="propmoves">${calNotice.lines.map((l) => `<li>${esc(l)}</li>`).join('')}${calNotice.more ? `<li>and ${calNotice.more} more</li>` : ''}</ul>
+    <div class="actions"><button type="button" class="ghost" data-calundo>Undo</button><button type="button" class="ghost" data-calok>Got it</button></div>
+  </section>`;
+}
+// One listener for the notice, wherever it's shown.
+app.addEventListener('click', (e) => {
+  if (e.target.closest('[data-calundo]')) undoCalendar();
+  else if (e.target.closest('[data-calok]')) { calNotice = null; route(); }
+});
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncCalendars(); });
+
+
 // ---------- fatigue-aware suggestions ----------
 // App logic looks at the next two days: muscle recovery (estimated), today's check-in and what the
 // athlete said. It proposes moving, swapping, lightening or resting; nothing changes until accepted.
@@ -1858,6 +2135,7 @@ function renderPlan() {
       <button type="button" class="switch" id="busy" role="switch" aria-checked="${!!entry.busy}"><span class="track" aria-hidden="true"></span>Busy week</button>
     </div>
   </div>
+  ${calNoticeCard()}
   ${proposalsCard(ctx)}
 
   <section class="card week-strip">
@@ -2344,6 +2622,7 @@ function renderHome() {
     ${todayOpen ? `<a class="btn primary big" href="${workoutHref(todays)}">${icon('play')}${loggedSets(key, todays, ctx.isShort(todays)) ? 'Continue today’s workout' : 'Start today’s workout'}</a>` : ''}
   </div>
   ${installBanner()}
+  ${calNoticeCard()}
   ${(() => { const n = weekProposals(ctx).proposals.length; return n ? `<a class="card suggest-banner" href="#plan">${icon('spark')}<span><b>${n === 1 ? 'A suggested change' : `${n} suggested changes`} for your week</b><small>Open This week to accept or say no.</small></span></a>` : ''; })()}
   ${recapCard(key, ctx.nextUp, sessions.length)}
   ${stats}
@@ -3995,6 +4274,7 @@ function renderSettings() {
         <p class="muted small">Changes how weights show and how you type them. Your history stays the same.</p>
       </section>
       ${accountPanel()}
+      ${calendarsPanel()}
       <section class="card stack">
         <h2>Your routine</h2>
         <p class="muted small">${usingCustom()
@@ -4016,6 +4296,7 @@ function renderSettings() {
   </div>`;
 
   wireAccountPanel();
+  wireCalendars();
   app.querySelectorAll('[data-theme]').forEach((b) => b.addEventListener('click', () => {
     state.theme = b.dataset.theme;
     applyTheme(); commit(); renderSettings();
@@ -4098,6 +4379,7 @@ loadAccount();
 if (state.setupDone) askToKeepData();
 rememberExerciseNames(state.exerciseNames);
 syncRoutine();
+syncCalendars();
 // Close an open options menu when tapping anywhere else.
 document.addEventListener('click', (e) => {
   document.querySelectorAll('details.menu[open]').forEach((m) => { if (!m.contains(e.target)) m.open = false; });

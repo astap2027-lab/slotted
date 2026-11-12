@@ -954,6 +954,19 @@ td .effort-opts { max-width: 300px; }
 @media (min-width: 900px) { .update-banner { bottom: 24px; } }
 .app-version { text-align: center; margin-top: 8px; }
 
+/* ---------- connected calendars ---------- */
+.cal-list, .cal-rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.cal-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-radius: var(--r-md); background: var(--surface-2); }
+.cal-list li > div { display: grid; gap: 2px; min-width: 0; }
+.cal-list small { display: block; }
+.cal-row { width: 100%; display: grid; gap: 2px; text-align: left; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-2); border: 1px solid transparent; }
+.cal-row:not(:disabled):hover { border-color: var(--line); }
+.cal-row:disabled { opacity: 1; cursor: default; }
+.cal-rule { padding: 12px; margin-top: 6px; border-radius: var(--r-md); border: 1px solid var(--line); }
+.cal-help ul { margin: 8px 0; padding-left: 1.2em; display: grid; gap: 6px; }
+.cal-notice { border-color: var(--lime-line); margin-bottom: 16px; }
+.linkish { background: none; border: 0; padding: 0 4px; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
+
 </style>
 <div class="shell">
     <aside class="sidebar" aria-label="Slotted">
@@ -1861,7 +1874,7 @@ function timePref(t, when = 'afternoon') {
 
 const ANCHORS = [16 * 60, 9 * 60, 17 * 60, 10 * 60, 7 * 60, 18 * 60, 18 * 60 + 30, 19 * 60, 6 * 60 + 30];
 
-// A free morning: the gap at the start of the day (before the first commitment) ends between 9:15am and noon and is
+// A free morning: school or work starts late, so the gap at the start of the day ends between 9:15am and noon and is
 // long enough for a session. Returns where a session could go (7am if it fits, else from the start of the gap) and
 // what the first commitment is, or null.
 function morningSlot(blocks, day, window, length) {
@@ -1872,6 +1885,8 @@ function morningSlot(blocks, day, window, length) {
   const start = a <= 7 * 60 && 7 * 60 + length <= b ? 7 * 60 : a;
   if (start < 6 * 60 + 30 || start + length > b) return null;
   const first = blocks.filter((x) => x.day === day).sort((x, y) => toMin(x.start) - toMin(y.start))[0];
+  // Only a late start to school or work makes a "free morning"; a mid-morning appointment on a free day doesn't.
+  if (!first || !['school', 'work'].includes(first.type)) return null;
   return { start, end: start + length, until: b, first: first ? { start: toMin(first.start), label: first.label, type: first.type, before: Number(first.before) || 0 } : null };
 }
 
@@ -1881,7 +1896,7 @@ function bestSlot(blocks, day, window, length, when = 'afternoon') {
   let best = null;
   // A free morning (school or work starts late, so the gap before it ends between about 9:15am and noon; a day with nothing on isn't one). With "mix" that day's
   // best time is before school, even if the afternoon is free too.
-  const freeMorning = when === 'mix' && gaps.some(([a, b]) => a <= toMin(window.start) && b >= 9 * 60 + 15 && b <= 12 * 60 && b - a >= length);
+  const freeMorning = when === 'mix' && !!morningSlot(blocks, day, window, length);
   const consider = (start, len, short) => {
     const morning = start >= 7 * 60 && start < 9 * 60;
     const pref = timePref(start, when) + (short ? 10 : 0) - (freeMorning && morning && !short ? 0.6 : 0);
@@ -3046,6 +3061,251 @@ function weekRecap({ history = {}, log = {}, prevKey, targetFor, sportCreditFor 
   return { hadWeek: !!prev && (done > 0 || planned > 0 || sets > 0), done, planned, target, met, prs, sets };
 }
 
+// ---- js/ical.js ----
+// Reading calendar links (iCalendar, .ics): Google Calendar, Apple/iCloud, Outlook and school apps all share
+// calendars this way. Pure functions only: the page fetches the text (through /api/calendar/fetch) and these
+// turn it into plain events for the weeks Slotted plans. Times come out in the device's time zone.
+
+// ---------- time zones ----------
+// Outlook and some school systems use Windows names for time zones.
+const WINDOWS_ZONES = {
+  'AUS Eastern Standard Time': 'Australia/Sydney', 'E. Australia Standard Time': 'Australia/Brisbane',
+  'Cen. Australia Standard Time': 'Australia/Adelaide', 'AUS Central Standard Time': 'Australia/Darwin',
+  'W. Australia Standard Time': 'Australia/Perth', 'Tasmania Standard Time': 'Australia/Hobart',
+  'New Zealand Standard Time': 'Pacific/Auckland', 'GMT Standard Time': 'Europe/London', 'UTC': 'UTC',
+  'Pacific Standard Time': 'America/Los_Angeles', 'Eastern Standard Time': 'America/New_York',
+};
+const zoneFormats = new Map();
+function zoneFormat(tz) {
+  if (!zoneFormats.has(tz)) {
+    zoneFormats.set(tz, new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' }));
+  }
+  return zoneFormats.get(tz);
+}
+// A usable IANA zone name, or null when the name isn't known.
+function cleanZone(tzid) {
+  if (!tzid) return null;
+  let z = String(tzid).replace(/^"|"$/g, '').replace(/^\/+/, '').trim();
+  if (WINDOWS_ZONES[z]) z = WINDOWS_ZONES[z];
+  // Some feeds prefix the name (for example "/mozilla.org/20050126_1/Australia/Sydney").
+  const m = z.match(/([A-Za-z]+\/[A-Za-z_]+(?:\/[A-Za-z_]+)?)$/);
+  if (m && !isZone(z)) z = m[1];
+  return isZone(z) ? z : null;
+}
+function isZone(z) { try { zoneFormat(z); return true; } catch { return false; } }
+
+// Wall-clock fields in a zone for an instant.
+function inZone(ms, tz) {
+  const p = Object.fromEntries(zoneFormat(tz).formatToParts(new Date(ms)).filter((x) => x.type !== 'literal').map((x) => [x.type, Number(x.value)]));
+  return { y: p.year, mo: p.month, d: p.day, h: p.hour % 24, mi: p.minute, s: p.second };
+}
+const offsetAt = (ms, tz) => { const f = inZone(ms, tz); return Date.UTC(f.y, f.mo - 1, f.d, f.h, f.mi, f.s) - Math.floor(ms / 1000) * 1000; };
+// The instant of a wall-clock time in a zone (handles daylight saving).
+function fromZone(f, tz) {
+  const guess = Date.UTC(f.y, f.mo - 1, f.d, f.h || 0, f.mi || 0, f.s || 0);
+  let t = guess - offsetAt(guess, tz);
+  const again = guess - offsetAt(t, tz);
+  if (again !== t) t = again;
+  return t;
+}
+
+// ---------- reading the text ----------
+const unescapeText = (v) => v.replace(/\\n/gi, '\n').replace(/\\([,;\\:])/g, '$1').trim();
+
+// One property line: NAME;PARAM=x;PARAM="y":value
+function parseLine(line) {
+  let i = 0;
+  let inQuote = false;
+  for (; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') inQuote = !inQuote;
+    else if (ch === ':' && !inQuote) break;
+  }
+  const head = line.slice(0, i);
+  const value = line.slice(i + 1);
+  const parts = head.match(/(?:[^;"]|"[^"]*")+/g) || [''];
+  const params = {};
+  for (const p of parts.slice(1)) {
+    const eq = p.indexOf('=');
+    if (eq > 0) params[p.slice(0, eq).toUpperCase()] = p.slice(eq + 1).replace(/^"|"$/g, '');
+  }
+  return { name: parts[0].toUpperCase(), params, value };
+}
+
+// "20261116T094000Z", "20261116T094000" (with TZID or floating), "20261116" (a date).
+function parseDate(value, params, defaultTz) {
+  const v = String(value || '').trim();
+  const m = v.match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})?(Z)?)?$/);
+  if (!m) return null;
+  const f = { y: +m[1], mo: +m[2], d: +m[3], h: +(m[4] || 0), mi: +(m[5] || 0), s: +(m[6] || 0) };
+  const allDay = !m[4] || (params && params.VALUE === 'DATE');
+  const tz = m[7] ? 'UTC' : cleanZone(params && params.TZID) || defaultTz;
+  return { f, allDay, tz };
+}
+
+// "PT1H30M", "P1D", "-PT15M"
+function parseDuration(v) {
+  const m = String(v || '').match(/^([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/);
+  if (!m) return null;
+  const ms = (((+m[2] || 0) * 7 + (+m[3] || 0)) * 86400 + (+m[4] || 0) * 3600 + (+m[5] || 0) * 60 + (+m[6] || 0)) * 1000;
+  return m[1] === '-' ? -ms : ms;
+}
+
+/**
+ * Parse calendar text into raw events. Returns { name, events: [{ uid, summary, location, start, end, duration,
+ * rrule, exdates, recurrenceId, cancelled, free }] }, with start/end as { f, allDay, tz }.
+ */
+function parseICS(text, { tz } = {}) {
+  const lines = String(text || '').replace(/\r\n?/g, '\n').replace(/\n[ \t]/g, '').split('\n');
+  const events = [];
+  let name = '';
+  let cur = null;
+  let depth = 0; // nested blocks inside an event (alarms) are skipped
+  for (const raw of lines) {
+    if (!raw) continue;
+    const { name: key, params, value } = parseLine(raw);
+    if (key === 'BEGIN' && value.toUpperCase() === 'VEVENT') { cur = { exdates: [], params: {} }; depth = 0; continue; }
+    if (!cur) { if (key === 'X-WR-CALNAME') name = unescapeText(value); continue; }
+    if (key === 'BEGIN') { depth++; continue; }
+    if (key === 'END' && value.toUpperCase() !== 'VEVENT') { depth = Math.max(0, depth - 1); continue; }
+    if (key === 'END') { events.push(cur); cur = null; continue; }
+    if (depth) continue;
+    switch (key) {
+      case 'UID': cur.uid = value.trim(); break;
+      case 'SUMMARY': cur.summary = unescapeText(value); break;
+      case 'LOCATION': cur.location = unescapeText(value); break;
+      case 'DTSTART': cur.start = parseDate(value, params, tz); break;
+      case 'DTEND': cur.end = parseDate(value, params, tz); break;
+      case 'DURATION': cur.duration = parseDuration(value); break;
+      case 'RRULE': cur.rrule = Object.fromEntries(value.split(';').map((p) => p.split('=')).filter((p) => p.length === 2).map(([k, v]) => [k.toUpperCase(), v])); break;
+      case 'EXDATE': for (const v of value.split(',')) { const d = parseDate(v, params, tz); if (d) cur.exdates.push(d); } break;
+      case 'RECURRENCE-ID': cur.recurrenceId = parseDate(value, params, tz); break;
+      case 'STATUS': cur.cancelled = value.trim().toUpperCase() === 'CANCELLED'; break;
+      case 'TRANSP': cur.free = value.trim().toUpperCase() === 'TRANSPARENT'; break;
+      default: break;
+    }
+  }
+  return { name, events: events.filter((e) => e.start) };
+}
+
+// ---------- dates ----------
+const DAY_MS = 86400000;
+const dayNum = (f) => Math.floor(Date.UTC(f.y, f.mo - 1, f.d) / DAY_MS); // days since 1970 for a calendar date
+const fromDayNum = (n) => { const d = new Date(n * DAY_MS); return { y: d.getUTCFullYear(), mo: d.getUTCMonth() + 1, d: d.getUTCDate() }; };
+const weekdayOf = (n) => (n + 3) % 7; // 0 = Monday (1970-01-01 was a Thursday)
+const WD = { MO: 0, TU: 1, WE: 2, TH: 3, FR: 4, SA: 5, SU: 6 };
+const ymd = (f) => `${f.y}-${String(f.mo).padStart(2, '0')}-${String(f.d).padStart(2, '0')}`;
+const hm = (f) => `${String(f.h).padStart(2, '0')}:${String(f.mi).padStart(2, '0')}`;
+
+// The instant an event time refers to. All-day dates count from midnight in the device's zone.
+function instantOf(dt, localTz) {
+  if (dt.allDay) return fromZone({ ...dt.f, h: 0, mi: 0, s: 0 }, localTz);
+  return fromZone(dt.f, dt.tz || localTz);
+}
+
+// Start dates (calendar dates, as day numbers) of a repeating event, in order, until `lastDay`.
+function* repeats(rule, startDay, lastDay) {
+  const freq = String(rule.FREQ || '').toUpperCase();
+  const interval = Math.max(1, Number(rule.INTERVAL) || 1);
+  const byDay = rule.BYDAY ? rule.BYDAY.split(',').map((x) => WD[x.replace(/^[+-]?\d+/, '').toUpperCase()]).filter((x) => x !== undefined) : null;
+  const byMonthDay = rule.BYMONTHDAY ? rule.BYMONTHDAY.split(',').map(Number).filter((x) => x > 0) : null;
+  let guard = 0;
+  if (freq === 'DAILY') {
+    for (let n = startDay; n <= lastDay && guard++ < 5000; n += interval) if (!byDay || byDay.includes(weekdayOf(n))) yield n;
+  } else if (freq === 'WEEKLY') {
+    const days = (byDay && byDay.length ? byDay : [weekdayOf(startDay)]).slice().sort((a, b) => a - b);
+    const monday = startDay - weekdayOf(startDay);
+    for (let w = monday; w <= lastDay && guard++ < 5000; w += 7 * interval) {
+      for (const d of days) { const n = w + d; if (n >= startDay && n <= lastDay) yield n; }
+    }
+  } else if (freq === 'MONTHLY' || freq === 'YEARLY') {
+    const s = fromDayNum(startDay);
+    const step = freq === 'MONTHLY' ? interval : 12 * interval;
+    for (let k = 0; guard++ < 2000; k += step) {
+      const y = s.y + Math.floor((s.mo - 1 + k) / 12);
+      const mo = ((s.mo - 1 + k) % 12) + 1;
+      if (Date.UTC(y, mo - 1, 1) / DAY_MS > lastDay) break;
+      for (const md of (freq === 'MONTHLY' && byMonthDay ? byMonthDay : [s.d])) {
+        const dt = new Date(Date.UTC(y, mo - 1, md));
+        if (dt.getUTCMonth() !== mo - 1) continue; // the 31st in a short month
+        const n = Math.floor(dt.getTime() / DAY_MS);
+        if (n >= startDay && n <= lastDay) yield n;
+      }
+    }
+  } else {
+    yield startDay;
+  }
+}
+
+/**
+ * Events overlapping [fromMs, toMs), expanded and in the device's zone.
+ * @returns [{ uid, title, location, start, end (ms), allDay, free, date ('YYYY-MM-DD'), startTime, endTime ('HH:MM'),
+ *   days: ['YYYY-MM-DD', ...] for all-day events }]
+ */
+function eventsBetween(text, fromMs, toMs, { tz } = {}) {
+  const localTz = cleanZone(tz) || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const { events } = parseICS(text, { tz: localTz });
+  // Single changed occurrences of a repeating event replace the original one.
+  const moved = new Map();
+  for (const e of events) if (e.recurrenceId) {
+    const k = `${e.uid}|${instantOf(e.recurrenceId, localTz)}`;
+    moved.set(k, e);
+  }
+  const out = [];
+  const add = (e, startMs, endMs, allDay) => {
+    if (e.cancelled || endMs <= fromMs || startMs >= toMs) return;
+    const s = inZone(startMs, localTz);
+    const en = inZone(Math.max(startMs, endMs - (allDay ? 1 : 0)), localTz);
+    const item = { uid: e.uid || '', title: e.summary || '', location: e.location || '', start: startMs, end: endMs, allDay, free: !!e.free, date: ymd(s) };
+    if (allDay) {
+      item.days = [];
+      for (let n = dayNum(s); n <= dayNum(en) && item.days.length < 31; n++) item.days.push(ymd(fromDayNum(n)));
+    } else {
+      item.startTime = hm(s);
+      // Something running past midnight is cut at the end of its first day.
+      item.endTime = ymd(en) === item.date ? hm(en) : '23:59';
+    }
+    out.push(item);
+  };
+  for (const e of events) {
+    if (e.recurrenceId) { add(e, instantOf(e.start, localTz), endOf(e, instantOf(e.start, localTz), localTz), e.start.allDay); continue; }
+    const startMs = instantOf(e.start, localTz);
+    const len = endOf(e, startMs, localTz) - startMs;
+    if (!e.rrule) { add(e, startMs, startMs + len, e.start.allDay); continue; }
+    // Repeats keep the wall-clock time in the event's own zone, so daylight saving doesn't shift them.
+    const zone = e.start.allDay ? localTz : (e.start.tz || localTz);
+    const startDay = dayNum(e.start.f);
+    const lastDay = dayNum(inZone(toMs, zone)) + 1;
+    const until = e.rrule.UNTIL ? parseDate(e.rrule.UNTIL, {}, zone) : null;
+    const untilMs = until ? (until.allDay ? fromZone({ ...until.f, h: 23, mi: 59, s: 59 }, zone) : instantOf(until, zone)) : Infinity;
+    const count = Number(e.rrule.COUNT) || Infinity;
+    const ex = new Set(e.exdates.map((d) => (d.allDay ? ymd(d.f) : instantOf(d, localTz))));
+    let n = 0;
+    for (const day of repeats(e.rrule, startDay, lastDay)) {
+      const f = { ...fromDayNum(day), h: e.start.f.h, mi: e.start.f.mi, s: e.start.f.s };
+      const occ = e.start.allDay ? fromZone({ ...f, h: 0, mi: 0, s: 0 }, zone) : fromZone(f, zone);
+      if (occ > untilMs || n >= count) break;
+      n++;
+      if (ex.has(occ) || ex.has(ymd(f))) continue;
+      if (moved.has(`${e.uid}|${occ}`)) continue; // shown as its changed copy instead
+      add(e, occ, occ + len, e.start.allDay);
+    }
+  }
+  return out.sort((a, b) => a.start - b.start);
+}
+
+function endOf(e, startMs, localTz) {
+  if (e.end) {
+    const t = instantOf(e.end, localTz);
+    if (t > startMs) return t;
+  }
+  if (e.duration && e.duration > 0) return startMs + e.duration;
+  return e.start.allDay ? startMs + DAY_MS : startMs;
+}
+
+// "webcal://" links are ordinary https links for calendar apps.
+const calendarUrl = (url) => String(url || '').trim().replace(/^webcals?:\/\//i, 'https://');
+
 // ---- js/timetable.js ----
 // The adaptable timetable: which commitments apply in a given week (Week A/B, every few weeks,
 // one-off changes), travel and preparation time, per-day training hours, and changes described in
@@ -3082,8 +3342,88 @@ const templateOf = (st, key) => (st.useAB ? weekType(key, st.abAnchor) : 'A');
 function weekBlocks(st, key) {
   const e = (st.history || {})[key] || {};
   const hidden = new Set(e.hidden || []);
-  const tpl = ((st.blocks || {})[templateOf(st, key)] || []).filter((b) => appliesTo(b, key) && !hidden.has(b.id));
-  return [...tpl, ...(e.extra || []).map((b) => ({ ...b, once: true }))];
+  // Commitments read from connected calendars for this week. On a day a School calendar has classes, it
+  // replaces the timetable's School block for that day.
+  const cal = (e.cal || []).filter((b) => !hidden.has(b.id)).map((b) => ({ ...b, cal: true }));
+  const calSchool = new Set(cal.filter((b) => b.type === 'school' && b.merged).map((b) => b.day));
+  const tpl = ((st.blocks || {})[templateOf(st, key)] || []).filter((b) => appliesTo(b, key) && !hidden.has(b.id) && !(b.type === 'school' && calSchool.has(b.day)));
+  return [...tpl, ...(e.extra || []).map((b) => ({ ...b, once: true })), ...cal];
+}
+
+// ---------- connected calendars ----------
+// Turns calendar events (from eventsBetween in ical.js) into commitments for one week. App logic only.
+const CAL_TYPES = { auto: 'Work it out from each event', school: 'School timetable', sport: 'Sport', work: 'Work', other: 'Other' };
+const CAL_SCHOOL = /\b(class|lesson|period|school|exam|assembly|tutorial|lecture|homeroom|roll call)\b/;
+const CAL_HARD = /\b(game|match|race|comp|competition|regatta|final|grand final|carnival|trials?)\b/;
+const CAL_EASY = /\b(easy|recovery|stretch|mobility|yoga|walk.?through|skills|light)\b/;
+const ruleKey = (title) => String(title || '').toLowerCase().replace(/\s+/g, ' ').trim();
+function guessType(title) {
+  const t = ` ${String(title || '').toLowerCase()} `;
+  if (SPORT_WORDS.test(t) || CAL_HARD.test(t)) return 'sport';
+  if (/\bwork\b|\bshift\b|\bjob\b/.test(t)) return 'work';
+  if (CAL_SCHOOL.test(t)) return 'school';
+  return 'other';
+}
+const guessEffort = (title) => { const t = String(title || '').toLowerCase(); return CAL_HARD.test(t) ? 'hard' : CAL_EASY.test(t) ? 'easy' : 'light'; };
+const dateNum = (s) => { const [y, m, d] = s.split('-').map(Number); return Math.round(Date.UTC(y, m - 1, d) / 86400000); };
+
+/**
+ * @param events  from eventsBetween()
+ * @param cal     { id, name, type: 'auto'|'school'|'sport'|'work'|'other', allDayBlocks }
+ * @param rules   { [ruleKey(title)]: { type, intensity, flex, ignore } }
+ * @param key     the week (Monday date)
+ */
+function calendarBlocks(events, cal, rules = {}, key) {
+  const monday = dateNum(key);
+  const dayOf = (date) => { const d = dateNum(date) - monday; return d >= 0 && d <= 6 ? d : null; };
+  const out = [];
+  const school = new Map(); // day -> merged classes (School calendars)
+  for (const e of events || []) {
+    if (e.free || (e.uid && /@slotted$/i.test(e.uid))) continue; // "free" events, and Slotted's own feed
+    const rule = rules[ruleKey(e.title)] || {};
+    if (rule.ignore) continue;
+    const label = String(e.title || cal.name || 'Calendar').slice(0, 60);
+    if (e.allDay) {
+      if (!cal.allDayBlocks) continue;
+      for (const date of e.days || []) {
+        const day = dayOf(date);
+        if (day !== null) out.push({ id: `cal:${cal.id}:${e.uid || label}:${date}`, day, start: '00:00', end: '23:59', type: rule.type || 'other', label, calId: cal.id, calName: cal.name });
+      }
+      continue;
+    }
+    const day = dayOf(e.date);
+    if (day === null || !e.startTime || !e.endTime || e.endTime <= e.startTime) continue;
+    if (cal.type === 'school' && !rule.type) {
+      if (PH_FREE.test(label)) continue; // study and free periods
+      const m = school.get(day);
+      school.set(day, m ? { start: e.startTime < m.start ? e.startTime : m.start, end: e.endTime > m.end ? e.endTime : m.end, n: m.n + 1 } : { start: e.startTime, end: e.endTime, n: 1 });
+      continue;
+    }
+    const type = rule.type || (cal.type && cal.type !== 'auto' ? cal.type : guessType(label));
+    out.push({
+      id: `cal:${cal.id}:${e.uid || label}:${e.date}:${e.startTime}`, day, start: e.startTime, end: e.endTime, type, label, calId: cal.id, calName: cal.name,
+      ...(type === 'sport' ? { intensity: sportEffort(rule.intensity || guessEffort(label)) } : {}),
+      ...(rule.flex ? { flex: true } : {}),
+    });
+  }
+  for (const [day, m] of school) out.push({ id: `cal:${cal.id}:school:${day}`, day, start: m.start, end: m.end, type: 'school', label: 'School', merged: true, classes: m.n, calId: cal.id, calName: cal.name });
+  return out.sort((a, b) => a.day - b.day || toMin(a.start) - toMin(b.start));
+}
+
+// What changed between two weeks' calendar commitments, in plain words.
+function calendarDiff(before = [], after = []) {
+  const key = (b) => `${b.calId}|${b.label}|${b.day}`;
+  const was = new Map(before.map((b) => [key(b), b]));
+  const now = new Map(after.map((b) => [key(b), b]));
+  const when = (b) => `${DAYS[b.day]} ${b.start === '00:00' && b.end === '23:59' ? 'all day' : `${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}`}`;
+  const lines = [];
+  for (const [k, b] of now) {
+    const old = was.get(k);
+    if (!old) lines.push(`Added: ${b.label}, ${when(b)}`);
+    else if (old.start !== b.start || old.end !== b.end) lines.push(`Moved: ${b.label}, now ${when(b)}`);
+  }
+  for (const [k, b] of was) if (!now.has(k)) lines.push(`Removed: ${b.label}, ${when(b)}`);
+  return lines;
 }
 
 // Training hours for a day: this week's one-off, then the usual for that weekday, then the default.
@@ -3121,7 +3461,7 @@ const DAY_WORDS = [
   [/\bmon(day)?s?\b/, 0], [/\btue(s|sday)?s?\b/, 1], [/\bwed(nesday)?s?\b/, 2], [/\bthu(r|rs|rsday)?s?\b/, 3],
   [/\bfri(day)?s?\b/, 4], [/\bsat(urday)?s?\b/, 5], [/\bsun(day)?s?\b/, 6],
 ];
-const SPORT_WORDS = /basketball|soccer|football|footy|rugby|netball|tennis|swim|cricket|hockey|volleyball|athletics|rowing|touch|baseball|softball|water polo|lacrosse|futsal|badminton|squash|gymnastics|dance|martial|karate|boxing|cross country|running club|training|practice|game|match|race|comp\b|competition/;
+const SPORT_WORDS = /basketball|sailing|surf|cycling|orienteering|climbing|equestrian|rugby league|soccer|football|footy|rugby|netball|tennis|swim|cricket|hockey|volleyball|athletics|rowing|touch|baseball|softball|water polo|lacrosse|futsal|badminton|squash|gymnastics|dance|martial|karate|boxing|cross country|running club|training|practice|game|match|race|comp\b|competition/;
 const GROUP_WORDS = [
   [/\blegs?\b|lower body/, ['quads', 'hamstrings', 'glutes', 'calves']], [/quads?|quadriceps|thighs?/, ['quads']], [/hamstrings?|hammies/, ['hamstrings']],
   [/glutes?|bum|butt/, ['glutes']], [/calf|calves/, ['calves']], [/\barms?\b/, ['biceps', 'triceps', 'forearms']], [/\bbi(cep)?s?\b|biceps?/, ['biceps']],
@@ -4006,7 +4346,7 @@ const EFFORT_WORDS = { hard: 'game, full effort', easy: 'easy session, minimal e
 function commitmentLines(blocks, when = '') {
   const list = (blocks || []).slice().sort((a, b) => a.day - b.day || toMin(a.start) - toMin(b.start));
   const at = (b) => `${DAYS_SHORT[b.day]} ${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}`;
-  const tags = (b) => `${b.flex ? ' (flexible)' : ''}${b.once ? ' (this week only)' : ''}`;
+  const tags = (b) => `${b.flex ? ' (flexible)' : ''}${b.once ? ' (this week only)' : ''}${b.cal ? ' (from calendar)' : ''}`;
   const lines = [];
   const sport = list.filter((b) => b.type === 'sport');
   if (sport.length) lines.push(`Sport${when}: ${sport.map((b) => `${at(b)} ${b.label || 'Sport'} (${EFFORT_WORDS[b.intensity] || 'training, moderate effort'})${tags(b)}`).join(', ')}.`);
@@ -4219,6 +4559,8 @@ function mergeStates(local, server) {
     if (o.reports || n.reports) n.reports = { ...(o.reports || {}), ...(n.reports || {}) };
     if (o.dismissed || n.dismissed) n.dismissed = union(n.dismissed, o.dismissed);
     if (!n.plan && o.plan) n.plan = clone(o.plan);
+    // Commitments read from a connected calendar: the newer copy wins; keep the other's if the newer has none.
+    if (!n.cal && o.cal) n.cal = clone(o.cal);
   }
 
   out.log = clone(newer.log || {});
@@ -4314,7 +4656,7 @@ const MUSCLE_LABEL = Object.fromEntries(MUSCLES.map((m) => [m.id, m.label]));
 const fmtNum = (n) => Math.round(n).toLocaleString('en-AU');
 const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 // The release number. It must match CACHE in sw.js (a test checks); shown at the bottom of Settings.
-const APP_VERSION = 32;
+const APP_VERSION = 33;
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const subnav = (cur) => `<nav class="subnav" aria-label="Training">${[['plan', 'This week'], ['week', 'My week'], ['routine', 'Routine'], ['library', 'Library']]
   .map(([v, t]) => `<a href="#${v}" ${v === cur ? 'aria-current="page"' : ''}>${t}</a>`).join('')}</nav>`;
@@ -4768,6 +5110,7 @@ function renderWeek() {
     </div>
     <div class="stack">
       ${availHtml()}
+      ${calendarCard()}
       ${oneOffCard()}
       ${hasSchool ? '' : `
       <section class="card stack">
@@ -4838,6 +5181,7 @@ function renderWeek() {
   app.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => { editingWeek = b.dataset.tab; editingBlock = null; renderWeek(); }));
   wireAvail(renderWeek);
   wireWeekExtras();
+  wireCalendarCard();
   app.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => {
     state.blocks[editingWeek] = state.blocks[editingWeek].filter((x) => x.id !== b.dataset.del);
     commit(); renderWeek();
@@ -5494,6 +5838,279 @@ function recapCard(key, nextUp, count) {
 }
 
 
+// ---------- connected calendars ----------
+// Google, Apple/iCloud, Outlook and school apps share calendars as iCal links. The server reads the link
+// (/api/calendar/fetch); app logic turns this week's and next week's events into commitments (history[week].cal),
+// replans, and says what changed with an Undo. Nothing here uses the AI.
+let calTexts = {}; // calendar id -> the text last read (kept only while the page is open)
+let calBusy = false;
+let calNotice = null; // { lines, more, undo }
+let editingCal = null; // the imported commitment open for editing on My week
+const CAL_CHECK_MS = 15 * 60 * 1000;
+const calList = () => (state.calendars || []).filter((c) => c && c.url);
+const CAL_ERRORS = {
+  offline: 'You’re offline, so Slotted couldn’t read it.',
+  not_found: 'That link didn’t work. It may have been changed or turned off.',
+  bad_url: 'That doesn’t look like a calendar link. It should start with https:// or webcal://.',
+  not_calendar: 'That link opened a web page, not a calendar. Copy the iCal or calendar feed link instead.',
+  too_big: 'That calendar is too big to read.',
+  timeout: 'The calendar took too long to answer.',
+  rate_limited: 'Too many checks today. Slotted will try again tomorrow.',
+  unreachable: 'Couldn’t reach that calendar right now. Slotted will try again later.',
+};
+
+async function readCalendar(url) {
+  let res;
+  try {
+    res = await fetch('/api/calendar/fetch', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url: calendarUrl(url) }) });
+  } catch { return { error: 'offline' }; }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || typeof data.text !== 'string') return { error: data.error || (res.status === 404 ? 'not_found' : 'unreachable') };
+  return { text: data.text };
+}
+
+// This week's and next week's calendar commitments from what has been read. A calendar not read this time keeps
+// what it had, so a failed read never wipes anything.
+function calendarWeeks(texts) {
+  const key = currentWeek();
+  const weeks = [key, addWeeks(key, 1)];
+  const from = keyToDate(key).getTime();
+  const to = keyToDate(addWeeks(key, 2)).getTime();
+  const out = Object.fromEntries(weeks.map((wk) => [wk, []]));
+  for (const c of calList()) {
+    const text = texts[c.id];
+    if (text === undefined) {
+      for (const wk of weeks) out[wk].push(...(((state.history[wk] || {}).cal) || []).filter((b) => b.calId === c.id));
+      continue;
+    }
+    const evs = eventsBetween(text, from, to);
+    let n = 0;
+    for (const wk of weeks) { const list = calendarBlocks(evs, c, state.calendarRules || {}, wk); n += list.length; out[wk].push(...list); }
+    c.lastCount = n;
+  }
+  return out;
+}
+
+const calSig = (blocks) => {
+  const t = JSON.stringify((blocks || []).map((b) => [b.id, b.start, b.end, b.type, b.intensity, b.flex]));
+  let h = 0;
+  for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0;
+  return String(h);
+};
+
+// Save new calendar commitments, replan the rest of this week, and remember what changed (with an Undo).
+function applyCalendarWeeks(next, { quiet = false } = {}) {
+  const key = currentWeek();
+  const prev = {};
+  const sigs = {};
+  const lines = [];
+  for (const [wk, blocks] of Object.entries(next)) {
+    const e = (state.history[wk] = state.history[wk] || {});
+    const before = e.cal || [];
+    if (JSON.stringify(before) === JSON.stringify(blocks)) continue;
+    const sig = calSig(blocks);
+    if (e.calHold === sig) continue; // they undid exactly this; wait until the calendar changes again
+    prev[wk] = before; sigs[wk] = sig;
+    lines.push(...calendarDiff(before, blocks).map((l) => (wk === key ? l : `${l}, next week`)));
+    if (blocks.length) e.cal = blocks; else delete e.cal;
+    delete e.calHold;
+  }
+  if (!Object.keys(prev).length) return false;
+  const entry = state.history[key];
+  const planBefore = entry && entry.plan ? JSON.parse(JSON.stringify(entry.plan)) : null;
+  if (planBefore) replan(key);
+  commit();
+  if (!quiet && lines.length) calNotice = { lines: lines.slice(0, 8), more: Math.max(0, lines.length - 8), undo: { prev, sigs, planBefore } };
+  return true;
+}
+
+function undoCalendar() {
+  const n = calNotice;
+  if (!n) return;
+  const key = currentWeek();
+  for (const [wk, before] of Object.entries(n.undo.prev)) {
+    const e = (state.history[wk] = state.history[wk] || {});
+    if (before.length) e.cal = before; else delete e.cal;
+    e.calHold = n.undo.sigs[wk];
+  }
+  if (n.undo.planBefore && state.history[key]) { state.history[key].plan = n.undo.planBefore; state.history[key].inputs = planInputs(key); }
+  calNotice = null;
+  commit(); route();
+  toast('Calendar change undone');
+}
+
+// Read every connected calendar (at most every 15 minutes unless asked), then apply what changed.
+async function syncCalendars({ force = false, after = null } = {}) {
+  const cals = calList();
+  if (!cals.length || calBusy || !state.setupDone) return;
+  if (!force && Object.keys(calTexts).length && Date.now() - (state.calendarCheckedAt || 0) < CAL_CHECK_MS) return;
+  calBusy = true;
+  if (after) after();
+  try {
+    const results = await Promise.all(cals.map((c) => readCalendar(c.url)));
+    cals.forEach((c, i) => {
+      const r = results[i];
+      if (r.text !== undefined) { calTexts[c.id] = r.text; c.lastSync = Date.now(); c.error = ''; } else { c.error = r.error; c.errorAt = Date.now(); }
+    });
+    if (force) for (const wk of [currentWeek(), addWeeks(currentWeek(), 1)]) if (state.history[wk]) delete state.history[wk].calHold;
+    state.calendarCheckedAt = Date.now();
+    const changed = applyCalendarWeeks(calendarWeeks(calTexts));
+    if (!changed) commit();
+    calBusy = false;
+    if (after) after();
+    else if (changed && viewName() !== 'workout') route();
+  } finally { calBusy = false; }
+}
+
+const calAgo = (t) => { const m = Math.round((Date.now() - t) / 60000); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : `at ${new Date(t).toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' })}`; };
+
+function calendarsPanel() {
+  const cals = calList();
+  return `<section class="card stack" id="calendars-card">
+    <h2>Calendars</h2>
+    <p class="muted small">Connect Google Calendar, Apple Calendar or your school app. Slotted reads it whenever you open the app, plans your gym sessions around what’s on, and tells you what changed.</p>
+    ${cals.length ? `<ul class="cal-list">${cals.map((c) => `<li>
+      <div><b>${esc(c.name)}</b>
+        <small class="muted">${esc(CAL_TYPES[c.type] || CAL_TYPES.auto)}${c.allDayBlocks ? '. All-day events block the day' : ''}</small>
+        <small class="${c.error ? 'note-warn' : 'muted'}">${c.error ? esc(CAL_ERRORS[c.error] || CAL_ERRORS.unreachable) : c.lastSync ? `Read ${calAgo(c.lastSync)}${c.lastCount !== undefined ? `. ${plural(c.lastCount, 'commitment')} this week and next` : ''}` : 'Not read yet'}</small></div>
+      <button type="button" class="ghost danger" data-calrm="${esc(c.id)}" aria-label="Remove ${esc(c.name)}">Remove</button>
+    </li>`).join('')}</ul>
+    <div class="actions"><button type="button" id="cal-check" ${calBusy ? 'disabled' : ''}>${calBusy ? 'Checking…' : 'Check now'}</button></div>` : ''}
+    <form id="cal-add" class="stack" novalidate>
+      <div class="field"><label for="cal-url">Calendar link</label><input id="cal-url" name="url" type="url" inputmode="url" autocomplete="off" placeholder="https://… or webcal://…"></div>
+      <div class="row">
+        <div class="field"><label for="cal-name">Name</label><input id="cal-name" name="name" type="text" maxlength="30" placeholder="Google, School…"></div>
+        <div class="field"><label for="cal-type">What’s in it</label><select id="cal-type" name="type">${Object.entries(CAL_TYPES).map(([v, t]) => `<option value="${v}">${esc(t)}</option>`).join('')}</select></div>
+      </div>
+      <label class="chip"><input type="checkbox" name="allday" value="1"><span>All-day events mean I can’t train</span></label>
+      <p class="errors" id="cal-err" role="alert"></p>
+      <div class="actions"><button type="submit" class="primary">Add calendar</button></div>
+    </form>
+    <details class="cal-help"><summary>Where do I find my calendar link?</summary>
+      <ul class="small">
+        <li><b>Google Calendar</b>, on a computer: Settings, choose the calendar on the left, then Integrate calendar. Copy <i>Secret address in iCal format</i>.</li>
+        <li><b>Apple Calendar</b> on iPhone: Calendars, tap ⓘ next to the calendar, turn on Public Calendar, then Share Link. On a Mac: right-click the calendar, Share Calendar, tick Public Calendar.</li>
+        <li><b>School apps</b> (Compass, SEQTA, Sentral and others): look for Subscribe, iCal, Calendar feed or Export on the calendar or timetable page.</li>
+        <li><b>Outlook</b>: Settings, Calendar, Shared calendars, Publish a calendar, then copy the ICS link.</li>
+      </ul>
+      <p class="small muted">Pick <i>School timetable</i> for a school app: its classes become one School block a day (study periods don’t count), replacing your typed-in school times on those days.</p>
+    </details>
+    <p class="muted small">A calendar link works like a password: anyone with it can see that calendar. It’s saved with your Slotted data, and event names are shared with the coach when you ask it something. Remove it here any time.</p>
+  </section>`;
+}
+
+function wireCalendars() {
+  const form = document.getElementById('cal-add');
+  if (!form) return;
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const f = new FormData(form);
+    const url = calendarUrl(f.get('url'));
+    const err = document.getElementById('cal-err');
+    if (!/^https:\/\/[^\s/]+\.[^\s]+/i.test(url)) { err.textContent = CAL_ERRORS.bad_url; return; }
+    if (calList().some((c) => calendarUrl(c.url) === url)) { err.textContent = 'That calendar is already connected.'; return; }
+    const btn = form.querySelector('button[type=submit]');
+    btn.disabled = true; btn.textContent = 'Checking the link…'; err.textContent = '';
+    const r = await readCalendar(url);
+    if (r.error) { btn.disabled = false; btn.textContent = 'Add calendar'; err.textContent = CAL_ERRORS[r.error] || CAL_ERRORS.unreachable; return; }
+    const name = (String(f.get('name') || '').trim() || parseICS(r.text).name || 'Calendar').slice(0, 30);
+    const c = { id: `c${uid()}`, name, url, type: CAL_TYPES[f.get('type')] ? f.get('type') : 'auto', allDayBlocks: f.get('allday') === '1', lastSync: Date.now(), error: '' };
+    state.calendars = [...(state.calendars || []), c];
+    calTexts[c.id] = r.text;
+    applyCalendarWeeks(calendarWeeks(calTexts));
+    commit(); renderSettings(); renderSideWeek();
+    toast(`${name} connected`);
+  });
+  app.querySelectorAll('[data-calrm]').forEach((b) => b.addEventListener('click', () => {
+    const id = b.dataset.calrm;
+    state.calendars = (state.calendars || []).filter((c) => c.id !== id);
+    delete calTexts[id];
+    applyCalendarWeeks(calendarWeeks(calTexts), { quiet: true });
+    commit(); renderSettings(); renderSideWeek();
+    toast('Calendar removed');
+  }));
+  const check = document.getElementById('cal-check');
+  if (check) check.addEventListener('click', () => syncCalendars({ force: true, after: () => { if (viewName() === 'profile') renderSettings(); } }));
+}
+
+// My week: what came from calendars this week and next, with a way to say how Slotted should treat each event.
+function calendarCard() {
+  if (!calList().length) return '';
+  const key = currentWeek();
+  const rows = [];
+  for (const wk of [key, addWeeks(key, 1)]) for (const b of ((state.history[wk] || {}).cal || [])) rows.push({ wk, b });
+  const when = (b) => (b.start === '00:00' && b.end === '23:59' ? 'all day' : `${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}`);
+  return `<section class="card stack" aria-labelledby="calc-h">
+    <div class="card-head"><h2 id="calc-h">From your calendars</h2><a href="#profile">Calendars</a></div>
+    ${rows.length ? `<ul class="cal-rows">${rows.map(({ wk, b }) => {
+      const rule = (state.calendarRules || {})[ruleKey(b.label)] || {};
+      const open = editingCal === b.id;
+      return `<li>
+        <button type="button" class="cal-row" data-caledit="${esc(b.id)}" aria-expanded="${open}" ${b.merged ? 'disabled' : ''}>
+          <span><b>${esc(b.label)}</b> ${wk === key ? '' : 'next '}${DAYS[b.day]}, ${when(b)}</span>
+          <small class="muted">${esc(BLOCK_TYPES[b.type] || 'Other')}${b.type === 'sport' ? `, ${esc(SPORT_EFFORTS[sportEffort(b.intensity)].label.toLowerCase())}` : ''}${b.flex ? ', flexible' : ''}${b.merged ? `, ${plural(b.classes, 'class', 'classes')} from ${esc(b.calName || 'your school calendar')}` : ''}</small>
+        </button>
+        ${open ? `<form class="cal-rule stack" data-calrule="${esc(b.label)}">
+          <p class="small muted">For every event called “${esc(b.label)}”:</p>
+          <div class="row">
+            <div class="field"><label for="cr-type">Type</label><select id="cr-type" name="type">${Object.entries(BLOCK_TYPES).map(([v, t]) => `<option value="${v}" ${(rule.type || b.type) === v ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
+            <div class="field"><label for="cr-int">If it’s sport</label><select id="cr-int" name="intensity">${Object.entries(SPORT_EFFORTS).map(([v, t]) => `<option value="${v}" ${(rule.intensity || b.intensity || 'light') === v ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></div>
+          </div>
+          <label class="chip"><input type="checkbox" name="flex" value="1" ${rule.flex || b.flex ? 'checked' : ''}><span>Flexible (can move if the week is too full)</span></label>
+          <label class="chip"><input type="checkbox" name="ignore" value="1"><span>Ignore events called “${esc(b.label)}”</span></label>
+          <div class="actions"><button type="submit" class="primary">Save</button><button type="button" class="ghost" data-calclose>Cancel</button></div>
+        </form>` : ''}
+      </li>`;
+    }).join('')}</ul>` : '<p class="small muted">Nothing from your calendars this week or next.</p>'}
+    ${(state.calendarRules && Object.values(state.calendarRules).some((r) => r.ignore)) ? `<p class="small muted">Ignoring: ${Object.entries(state.calendarRules).filter(([, r]) => r.ignore).map(([k]) => `<button type="button" class="linkish" data-calunignore="${esc(k)}">${esc(k)} ×</button>`).join(' ')}</p>` : ''}
+  </section>`;
+}
+
+function wireCalendarCard() {
+  app.querySelectorAll('[data-caledit]').forEach((b) => b.addEventListener('click', () => { editingCal = editingCal === b.dataset.caledit ? null : b.dataset.caledit; renderWeek(); }));
+  app.querySelectorAll('[data-calclose]').forEach((b) => b.addEventListener('click', () => { editingCal = null; renderWeek(); }));
+  const reapply = () => {
+    if (calList().every((c) => calTexts[c.id] !== undefined)) applyCalendarWeeks(calendarWeeks(calTexts), { quiet: true });
+    else syncCalendars({ force: true, after: () => { if (viewName() === 'week') renderWeek(); } });
+    editingCal = null; commit(); renderWeek(); renderSideWeek();
+  };
+  app.querySelectorAll('[data-calrule]').forEach((form) => form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const f = new FormData(form);
+    const type = f.get('type');
+    state.calendarRules = { ...(state.calendarRules || {}), [ruleKey(form.dataset.calrule)]: {
+      type: BLOCK_TYPES[type] ? type : 'other',
+      ...(type === 'sport' ? { intensity: sportEffort(f.get('intensity')) } : {}),
+      ...(f.get('flex') ? { flex: true } : {}),
+      ...(f.get('ignore') ? { ignore: true } : {}),
+    } };
+    reapply();
+    toast(f.get('ignore') ? `Ignoring “${form.dataset.calrule}”` : 'Saved for every event with that name');
+  }));
+  app.querySelectorAll('[data-calunignore]').forEach((b) => b.addEventListener('click', () => {
+    const rules = { ...(state.calendarRules || {}) };
+    delete rules[b.dataset.calunignore];
+    state.calendarRules = rules;
+    reapply();
+  }));
+}
+
+function calNoticeCard() {
+  if (!calNotice) return '';
+  return `<section class="card cal-notice" role="status" aria-labelledby="caln-h">
+    <div class="card-head"><h2 id="caln-h">Your calendar changed</h2><span class="label">Plan updated</span></div>
+    <ul class="propmoves">${calNotice.lines.map((l) => `<li>${esc(l)}</li>`).join('')}${calNotice.more ? `<li>and ${calNotice.more} more</li>` : ''}</ul>
+    <div class="actions"><button type="button" class="ghost" data-calundo>Undo</button><button type="button" class="ghost" data-calok>Got it</button></div>
+  </section>`;
+}
+// One listener for the notice, wherever it's shown.
+app.addEventListener('click', (e) => {
+  if (e.target.closest('[data-calundo]')) undoCalendar();
+  else if (e.target.closest('[data-calok]')) { calNotice = null; route(); }
+});
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncCalendars(); });
+
+
 // ---------- fatigue-aware suggestions ----------
 // App logic looks at the next two days: muscle recovery (estimated), today's check-in and what the
 // athlete said. It proposes moving, swapping, lightening or resting; nothing changes until accepted.
@@ -6070,6 +6687,7 @@ function renderPlan() {
       <button type="button" class="switch" id="busy" role="switch" aria-checked="${!!entry.busy}"><span class="track" aria-hidden="true"></span>Busy week</button>
     </div>
   </div>
+  ${calNoticeCard()}
   ${proposalsCard(ctx)}
 
   <section class="card week-strip">
@@ -6556,6 +7174,7 @@ function renderHome() {
     ${todayOpen ? `<a class="btn primary big" href="${workoutHref(todays)}">${icon('play')}${loggedSets(key, todays, ctx.isShort(todays)) ? 'Continue today’s workout' : 'Start today’s workout'}</a>` : ''}
   </div>
   ${installBanner()}
+  ${calNoticeCard()}
   ${(() => { const n = weekProposals(ctx).proposals.length; return n ? `<a class="card suggest-banner" href="#plan">${icon('spark')}<span><b>${n === 1 ? 'A suggested change' : `${n} suggested changes`} for your week</b><small>Open This week to accept or say no.</small></span></a>` : ''; })()}
   ${recapCard(key, ctx.nextUp, sessions.length)}
   ${stats}
@@ -8207,6 +8826,7 @@ function renderSettings() {
         <p class="muted small">Changes how weights show and how you type them. Your history stays the same.</p>
       </section>
       ${accountPanel()}
+      ${calendarsPanel()}
       <section class="card stack">
         <h2>Your routine</h2>
         <p class="muted small">${usingCustom()
@@ -8228,6 +8848,7 @@ function renderSettings() {
   </div>`;
 
   wireAccountPanel();
+  wireCalendars();
   app.querySelectorAll('[data-theme]').forEach((b) => b.addEventListener('click', () => {
     state.theme = b.dataset.theme;
     applyTheme(); commit(); renderSettings();
@@ -8310,6 +8931,7 @@ loadAccount();
 if (state.setupDone) askToKeepData();
 rememberExerciseNames(state.exerciseNames);
 syncRoutine();
+syncCalendars();
 // Close an open options menu when tapping anywhere else.
 document.addEventListener('click', (e) => {
   document.querySelectorAll('details.menu[open]').forEach((m) => { if (!m.contains(e.target)) m.open = false; });

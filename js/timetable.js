@@ -34,8 +34,88 @@ export const templateOf = (st, key) => (st.useAB ? weekType(key, st.abAnchor) : 
 export function weekBlocks(st, key) {
   const e = (st.history || {})[key] || {};
   const hidden = new Set(e.hidden || []);
-  const tpl = ((st.blocks || {})[templateOf(st, key)] || []).filter((b) => appliesTo(b, key) && !hidden.has(b.id));
-  return [...tpl, ...(e.extra || []).map((b) => ({ ...b, once: true }))];
+  // Commitments read from connected calendars for this week. On a day a School calendar has classes, it
+  // replaces the timetable's School block for that day.
+  const cal = (e.cal || []).filter((b) => !hidden.has(b.id)).map((b) => ({ ...b, cal: true }));
+  const calSchool = new Set(cal.filter((b) => b.type === 'school' && b.merged).map((b) => b.day));
+  const tpl = ((st.blocks || {})[templateOf(st, key)] || []).filter((b) => appliesTo(b, key) && !hidden.has(b.id) && !(b.type === 'school' && calSchool.has(b.day)));
+  return [...tpl, ...(e.extra || []).map((b) => ({ ...b, once: true })), ...cal];
+}
+
+// ---------- connected calendars ----------
+// Turns calendar events (from eventsBetween in ical.js) into commitments for one week. App logic only.
+export const CAL_TYPES = { auto: 'Work it out from each event', school: 'School timetable', sport: 'Sport', work: 'Work', other: 'Other' };
+const CAL_SCHOOL = /\b(class|lesson|period|school|exam|assembly|tutorial|lecture|homeroom|roll call)\b/;
+const CAL_HARD = /\b(game|match|race|comp|competition|regatta|final|grand final|carnival|trials?)\b/;
+const CAL_EASY = /\b(easy|recovery|stretch|mobility|yoga|walk.?through|skills|light)\b/;
+export const ruleKey = (title) => String(title || '').toLowerCase().replace(/\s+/g, ' ').trim();
+export function guessType(title) {
+  const t = ` ${String(title || '').toLowerCase()} `;
+  if (SPORT_WORDS.test(t) || CAL_HARD.test(t)) return 'sport';
+  if (/\bwork\b|\bshift\b|\bjob\b/.test(t)) return 'work';
+  if (CAL_SCHOOL.test(t)) return 'school';
+  return 'other';
+}
+export const guessEffort = (title) => { const t = String(title || '').toLowerCase(); return CAL_HARD.test(t) ? 'hard' : CAL_EASY.test(t) ? 'easy' : 'light'; };
+const dateNum = (s) => { const [y, m, d] = s.split('-').map(Number); return Math.round(Date.UTC(y, m - 1, d) / 86400000); };
+
+/**
+ * @param events  from eventsBetween()
+ * @param cal     { id, name, type: 'auto'|'school'|'sport'|'work'|'other', allDayBlocks }
+ * @param rules   { [ruleKey(title)]: { type, intensity, flex, ignore } }
+ * @param key     the week (Monday date)
+ */
+export function calendarBlocks(events, cal, rules = {}, key) {
+  const monday = dateNum(key);
+  const dayOf = (date) => { const d = dateNum(date) - monday; return d >= 0 && d <= 6 ? d : null; };
+  const out = [];
+  const school = new Map(); // day -> merged classes (School calendars)
+  for (const e of events || []) {
+    if (e.free || (e.uid && /@slotted$/i.test(e.uid))) continue; // "free" events, and Slotted's own feed
+    const rule = rules[ruleKey(e.title)] || {};
+    if (rule.ignore) continue;
+    const label = String(e.title || cal.name || 'Calendar').slice(0, 60);
+    if (e.allDay) {
+      if (!cal.allDayBlocks) continue;
+      for (const date of e.days || []) {
+        const day = dayOf(date);
+        if (day !== null) out.push({ id: `cal:${cal.id}:${e.uid || label}:${date}`, day, start: '00:00', end: '23:59', type: rule.type || 'other', label, calId: cal.id, calName: cal.name });
+      }
+      continue;
+    }
+    const day = dayOf(e.date);
+    if (day === null || !e.startTime || !e.endTime || e.endTime <= e.startTime) continue;
+    if (cal.type === 'school' && !rule.type) {
+      if (PH_FREE.test(label)) continue; // study and free periods
+      const m = school.get(day);
+      school.set(day, m ? { start: e.startTime < m.start ? e.startTime : m.start, end: e.endTime > m.end ? e.endTime : m.end, n: m.n + 1 } : { start: e.startTime, end: e.endTime, n: 1 });
+      continue;
+    }
+    const type = rule.type || (cal.type && cal.type !== 'auto' ? cal.type : guessType(label));
+    out.push({
+      id: `cal:${cal.id}:${e.uid || label}:${e.date}:${e.startTime}`, day, start: e.startTime, end: e.endTime, type, label, calId: cal.id, calName: cal.name,
+      ...(type === 'sport' ? { intensity: sportEffort(rule.intensity || guessEffort(label)) } : {}),
+      ...(rule.flex ? { flex: true } : {}),
+    });
+  }
+  for (const [day, m] of school) out.push({ id: `cal:${cal.id}:school:${day}`, day, start: m.start, end: m.end, type: 'school', label: 'School', merged: true, classes: m.n, calId: cal.id, calName: cal.name });
+  return out.sort((a, b) => a.day - b.day || toMin(a.start) - toMin(b.start));
+}
+
+// What changed between two weeks' calendar commitments, in plain words.
+export function calendarDiff(before = [], after = []) {
+  const key = (b) => `${b.calId}|${b.label}|${b.day}`;
+  const was = new Map(before.map((b) => [key(b), b]));
+  const now = new Map(after.map((b) => [key(b), b]));
+  const when = (b) => `${DAYS[b.day]} ${b.start === '00:00' && b.end === '23:59' ? 'all day' : `${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}`}`;
+  const lines = [];
+  for (const [k, b] of now) {
+    const old = was.get(k);
+    if (!old) lines.push(`Added: ${b.label}, ${when(b)}`);
+    else if (old.start !== b.start || old.end !== b.end) lines.push(`Moved: ${b.label}, now ${when(b)}`);
+  }
+  for (const [k, b] of was) if (!now.has(k)) lines.push(`Removed: ${b.label}, ${when(b)}`);
+  return lines;
 }
 
 // Training hours for a day: this week's one-off, then the usual for that weekday, then the default.
@@ -73,7 +153,7 @@ const DAY_WORDS = [
   [/\bmon(day)?s?\b/, 0], [/\btue(s|sday)?s?\b/, 1], [/\bwed(nesday)?s?\b/, 2], [/\bthu(r|rs|rsday)?s?\b/, 3],
   [/\bfri(day)?s?\b/, 4], [/\bsat(urday)?s?\b/, 5], [/\bsun(day)?s?\b/, 6],
 ];
-const SPORT_WORDS = /basketball|soccer|football|footy|rugby|netball|tennis|swim|cricket|hockey|volleyball|athletics|rowing|touch|baseball|softball|water polo|lacrosse|futsal|badminton|squash|gymnastics|dance|martial|karate|boxing|cross country|running club|training|practice|game|match|race|comp\b|competition/;
+const SPORT_WORDS = /basketball|sailing|surf|cycling|orienteering|climbing|equestrian|rugby league|soccer|football|footy|rugby|netball|tennis|swim|cricket|hockey|volleyball|athletics|rowing|touch|baseball|softball|water polo|lacrosse|futsal|badminton|squash|gymnastics|dance|martial|karate|boxing|cross country|running club|training|practice|game|match|race|comp\b|competition/;
 const GROUP_WORDS = [
   [/\blegs?\b|lower body/, ['quads', 'hamstrings', 'glutes', 'calves']], [/quads?|quadriceps|thighs?/, ['quads']], [/hamstrings?|hammies/, ['hamstrings']],
   [/glutes?|bum|butt/, ['glutes']], [/calf|calves/, ['calves']], [/\barms?\b/, ['biceps', 'triceps', 'forearms']], [/\bbi(cep)?s?\b|biceps?/, ['biceps']],

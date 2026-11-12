@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 
 const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8');
 
@@ -14,8 +14,10 @@ test('the version shown in Settings matches the service worker cache version', (
 test('every module in js/ is cached for offline use', () => {
   const sw = read('sw.js');
   const html = read('index.html');
-  for (const f of ['app', 'scheduler', 'timetable', 'adjust', 'coach', 'store', 'sync', 'tracking', 'units', 'exercises', 'freshness', 'progress', 'stats', 'workout', 'readiness', 'anatomy']) {
-    assert.ok(sw.includes(`./js/${f}.js`), `${f}.js is in SHELL`);
+  const build = read('tools/build-preview.mjs');
+  for (const f of readdirSync(new URL('../js/', import.meta.url)).filter((x) => x.endsWith('.js'))) {
+    assert.ok(sw.includes(`./js/${f}`), `${f} is in SHELL in sw.js`);
+    assert.ok(build.includes(`js/${f}`), `${f} is in the preview build list`);
   }
   assert.ok(html.includes('js/app.js'));
 });

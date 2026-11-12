@@ -30,7 +30,7 @@ const EFFORT_WORDS = { hard: 'game, full effort', easy: 'easy session, minimal e
 export function commitmentLines(blocks, when = '') {
   const list = (blocks || []).slice().sort((a, b) => a.day - b.day || toMin(a.start) - toMin(b.start));
   const at = (b) => `${DAYS_SHORT[b.day]} ${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}`;
-  const tags = (b) => `${b.flex ? ' (flexible)' : ''}${b.once ? ' (this week only)' : ''}`;
+  const tags = (b) => `${b.flex ? ' (flexible)' : ''}${b.once ? ' (this week only)' : ''}${b.cal ? ' (from calendar)' : ''}`;
   const lines = [];
   const sport = list.filter((b) => b.type === 'sport');
   if (sport.length) lines.push(`Sport${when}: ${sport.map((b) => `${at(b)} ${b.label || 'Sport'} (${EFFORT_WORDS[b.intensity] || 'training, moderate effort'})${tags(b)}`).join(', ')}.`);
