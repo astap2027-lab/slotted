@@ -1,6 +1,12 @@
 // Daybook web app: every screen, saving, reminders and shortcuts. Logic lives in core.js.
 import * as C from './core.js';
 
+// Where Daybook runs. The website uses the browser directly; another host (such as a
+// claude.ai page) can supply its own storage, file saving and status via window.DAYBOOK_HOST.
+const HOST = globalThis.DAYBOOK_HOST ?? {};
+const STORAGE = HOST.storage ?? (() => { try { return window.localStorage; } catch { return null; } })();
+const CAN_NOTIFY = !HOST.noSystemNotifications && 'Notification' in window;
+
 // ---------- Helpers ----------
 
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -73,18 +79,19 @@ const takesEntry = (v) => v === 'today' || v === 'upcoming' || v === 'inbox';
 
 const PREFS_KEY = 'daybook:prefs';
 function loadPrefs() {
-  try { return { name: '', theme: 'system', sort: 'manual', onboarded: false, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; }
+  try { return { name: '', theme: 'system', sort: 'manual', onboarded: false, ...JSON.parse(STORAGE?.getItem(PREFS_KEY) || '{}') }; }
   catch { return { name: '', theme: 'system', sort: 'manual', onboarded: false }; }
 }
 const prefs = loadPrefs();
-function savePrefs() { try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch { /* ignore */ } }
+function savePrefs() { try { STORAGE?.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch { /* ignore */ } }
 
 let store = null;
 let data = C.emptyData();
 let readOnly = false;
 let startupError = null;
 try {
-  store = C.createStore(localStorage);
+  if (!STORAGE) throw new Error('no storage');
+  store = C.createStore(STORAGE);
   data = store.load();
 } catch (err) {
   readOnly = true;
@@ -180,7 +187,7 @@ function renderSidebar() {
   const p = P();
   const prog = p.progress(data.tasks);
   const n = counts(p);
-  const denied = 'Notification' in window && Notification.permission === 'denied';
+  const denied = CAN_NOTIFY && Notification.permission === 'denied';
   const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
   $('#sidebar').innerHTML = `
     <div class="side-head">
@@ -198,6 +205,7 @@ function renderSidebar() {
     <div class="side-foot">
       ${denied ? `<div class="notice"><b>${icon('bellOff')}Notifications are off</b>Reminders will only show inside Daybook. Allow notifications for this site in your browser's settings.</div>` : ''}
       ${installPrompt && !standalone ? `<button class="btn primary" data-act="install">Install Daybook</button>` : ''}
+      ${HOST.statusText ? `<div class="hint" style="padding:0 9px">${esc(HOST.statusText())}</div>` : ''}
       <button class="side-btn" data-act="settings">${icon('gear')}Settings</button>
     </div>`;
 }
@@ -413,7 +421,7 @@ function renderInspector() {
   el.hidden = false;
   const rc = repeatChoice(t.recurrence);
   const remPast = t.reminder != null && t.reminder < Date.now() / 1000 && !t.isCompleted;
-  const denied = 'Notification' in window && Notification.permission === 'denied';
+  const denied = CAN_NOTIFY && Notification.permission === 'denied';
   el.innerHTML = `
     <div class="ins-top"><span>${t.isCompleted ? 'Completed task' : viewTitle(homeOf(t, p))}</span>
       <button class="icon-btn" data-act="closeEditor" title="Close (Esc)">${icon('x')}</button></div>
@@ -444,7 +452,7 @@ function renderInspector() {
         ${t.reminder != null ? `<label class="line"><span>At</span><input type="datetime-local" data-f="reminder" value="${toLocalInput(C.fromSec(t.reminder))}"></label>` : ''}
         ${remPast ? '<div class="hint warn">This time has passed. Pick a later time to be reminded.</div>' : ''}
         ${t.reminder != null && denied ? '<div class="hint warn">Notifications are blocked, so this reminder will only show inside Daybook.</div>' : ''}
-        ${t.reminder != null && !denied ? '<div class="hint">Reminders pop up while Daybook is open (it can be minimised).</div>' : ''}
+        ${t.reminder != null && !denied ? `<div class="hint">${CAN_NOTIFY ? 'Reminders pop up while Daybook is open (it can be minimised).' : 'Reminders pop up inside Daybook, with a sound, while it is open.'}</div>` : ''}
       </div>
       <div class="card">
         <h4>Repeat</h4>
@@ -547,7 +555,7 @@ function checkReminders() {
 }
 
 async function systemNotify(t) {
-  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  if (!CAN_NOTIFY || Notification.permission !== 'granted') return;
   const title = (t.isImportant ? '★ ' : '') + t.title;
   const options = {
     body: t.details.trim() || 'Reminder',
@@ -587,7 +595,7 @@ function handleNotificationAction(action, id) {
 }
 
 async function requestNotifications() {
-  if (!('Notification' in window)) { toast("This browser can't show notifications."); return; }
+  if (!CAN_NOTIFY) { toast('Reminders pop up inside Daybook while it is open.'); return; }
   try { await Notification.requestPermission(); } catch { /* ignore */ }
   render();
   renderSettings();
@@ -622,7 +630,7 @@ function quickAdd(text, view) {
   if (task.reminder) words.push('reminder ' + fmtReminder(task.reminder, P()));
   if (task.isImportant) words.push('important');
   toast(words.join(' · '));
-  if (task.reminder && 'Notification' in window && Notification.permission === 'default') requestNotifications();
+  if (task.reminder && CAN_NOTIFY && Notification.permission === 'default') requestNotifications();
   return true;
 }
 
@@ -655,7 +663,7 @@ function setReminder(id, date) {
     t.reminder = date ? C.toSec(date) : null;
     if (date && !t.dueDay) t.dueDay = C.dayKey(date);
   }));
-  if (date && 'Notification' in window && Notification.permission === 'default') requestNotifications();
+  if (date && CAN_NOTIFY && Notification.permission === 'default') requestNotifications();
 }
 
 function defaultReminder(t) {
@@ -736,11 +744,17 @@ function setView(v) {
   render();
 }
 
-function exportBackup() {
+async function exportBackup() {
+  const name = `Daybook Backup ${P().today}.json`;
+  if (HOST.saveFile) {
+    try { await HOST.saveFile(name, JSON.stringify(data, null, 2)); toast('Backup saved'); }
+    catch (err) { if (err?.code !== 'declined') toast(err?.message || "Couldn't save the backup."); }
+    return;
+  }
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `Daybook Backup ${P().today}.json`;
+  a.download = name;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -833,11 +847,12 @@ function confirmBox(title, text, okLabel = 'OK') {
 }
 
 function notifStatus() {
-  if (!('Notification' in window)) return 'unsupported';
+  if (!CAN_NOTIFY) return 'unsupported';
   return Notification.permission; // granted | denied | default
 }
 
 function installSteps() {
+  if (HOST.installText) return HOST.installText;
   const ua = navigator.userAgent;
   const safari = /Safari/.test(ua) && !/Chrome|Chromium|Edg/.test(ua);
   if (matchMedia('(display-mode: standalone)').matches || navigator.standalone) return '<p>Daybook is installed. Open it from your Dock or Launchpad.</p>';
@@ -910,8 +925,14 @@ function renderSettings() {
 }
 
 function applyTheme() {
-  if (prefs.theme === 'system') document.documentElement.removeAttribute('data-theme');
-  else document.documentElement.setAttribute('data-theme', prefs.theme);
+  const root = document.documentElement;
+  if (prefs.theme === 'system') {
+    // Only undo a theme Daybook set itself; a host may set its own.
+    if (root.dataset.daybookTheme) { root.removeAttribute('data-theme'); delete root.dataset.daybookTheme; }
+  } else {
+    root.setAttribute('data-theme', prefs.theme);
+    root.dataset.daybookTheme = '1';
+  }
 }
 
 // ---------- Toast ----------
@@ -1239,7 +1260,20 @@ document.addEventListener('dragend', () => {
   $$('.dragging, .drop-before, .drop-after').forEach((r) => r.classList.remove('dragging', 'drop-before', 'drop-after'));
 });
 
-// Another Daybook window or tab saved something.
+// Another Daybook window, tab or device saved something.
+function reloadFromHost() {
+  if (!store) return;
+  try {
+    Object.assign(prefs, loadPrefs());
+    applyTheme();
+    data = store.load();
+    render({ inspector: !document.activeElement?.dataset?.f });
+    if (prefs.onboarded && $('#welcome').open) $('#welcome').close();
+  } catch { /* keep what we have */ }
+}
+HOST.onChange?.(reloadFromHost);
+HOST.onStatus?.(() => keepFocus(renderSidebar));
+
 window.addEventListener('storage', (e) => {
   if (!store || e.key !== store.key) return;
   try { data = store.load(); render({ inspector: !document.activeElement?.dataset?.f }); } catch { /* keep what we have */ }
@@ -1267,7 +1301,7 @@ setInterval(() => {
 }, 10000);
 setTimeout(checkReminders, 500);
 
-if ('serviceWorker' in navigator) {
+if ('serviceWorker' in navigator && !HOST.noServiceWorker) {
   navigator.serviceWorker.register('sw.js').then((reg) => { swReg = reg; }).catch(() => {});
   navigator.serviceWorker.ready.then((reg) => { swReg = reg; }).catch(() => {});
   navigator.serviceWorker.addEventListener('message', (e) => {
