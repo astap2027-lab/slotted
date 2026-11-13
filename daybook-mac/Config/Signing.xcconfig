@@ -1,0 +1,15 @@
+// ── The only file you need to edit ─────────────────────────────────────────
+//
+// 1. DAYBOOK_TEAM: your Apple Team ID (10 letters/numbers). Find it in Xcode →
+//    Settings → Accounts → select your Apple ID → the team's ID, or at
+//    developer.apple.com/account → Membership details. A free Apple ID works.
+// 2. DAYBOOK_BUNDLE_PREFIX: something unique to you, like com.yourname.
+//
+// The widget and the app share data through the App Group "<Team ID>.daybook",
+// which is built from these values automatically.
+
+DAYBOOK_TEAM = ABCDE12345
+DAYBOOK_BUNDLE_PREFIX = com.example
+
+DEVELOPMENT_TEAM = $(DAYBOOK_TEAM)
+DAYBOOK_APP_GROUP = $(DAYBOOK_TEAM).daybook
