@@ -1,0 +1,57 @@
+# Builds the Daybook macOS app (daybook-mac/) on a GitHub Mac and uploads Daybook.zip.
+# Only runs when files in daybook-mac/ change. Has nothing to do with the Slotted website.
+name: Daybook Mac build
+
+on:
+  push:
+    paths:
+      - "daybook-mac/**"
+      - ".github/workflows/daybook-mac.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: daybook-mac
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode
+        run: xcodebuild -version
+
+      - name: Core tests
+        run: swift test
+
+      - name: Build app (signed to run locally, no Apple account)
+        run: |
+          set -o pipefail
+          xcodebuild -project Daybook.xcodeproj -target Daybook -configuration Release \
+            SYMROOT="$PWD/build" \
+            DAYBOOK_TEAM="" DEVELOPMENT_TEAM="" \
+            DAYBOOK_BUNDLE_PREFIX="app.daybook" \
+            DAYBOOK_APP_GROUP="daybook.shared" \
+            CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="-" PROVISIONING_PROFILE_SPECIFIER="" \
+            build 2>&1 | tee build.log | grep -E "error:|warning:|BUILD" || true
+          test -d build/Release/Daybook.app
+
+      - name: Check the widget is inside the app
+        run: |
+          ls build/Release/Daybook.app/Contents/PlugIns
+          codesign -dv --entitlements - build/Release/Daybook.app 2>&1 | head -40
+
+      - name: Zip
+        run: cd build/Release && ditto -c -k --keepParent Daybook.app "$GITHUB_WORKSPACE/Daybook.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Daybook
+          path: Daybook.zip
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log
+          path: daybook-mac/build.log
