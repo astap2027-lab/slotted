@@ -185,3 +185,74 @@ test('store: reads Mac app backups and old or partial data', () => {
   assert.equal(data.tasks[0].priority, 0);
   assert.equal(data.notes[0].checklist.length, 1);
 });
+
+// ---------- Email summary ----------
+
+const thread = (id, msgs) => ({ id, viewUrl: 'https://mail.google.com/mail/#all/' + id, messages: msgs });
+const msg = (o) => ({ sender: 'teacher@school.edu', addressDisplayNames: [{ displayName: 'Ms Smith', emailAddress: 'teacher@school.edu' }], date: '2026-11-12T23:00:00Z', labelIds: ['INBOX'], subject: 'Excursion form', ...o });
+
+test('email: text keeps the new part only', () => {
+  const t = C.emailText('Hi Axel,\nPlease return the form by Friday.\n\nOn Tue, 10 Nov 2026 at 9:00, Bob <b@x.com> wrote:\n> old stuff\n> more');
+  assert.equal(t, 'Hi Axel,\nPlease return the form by Friday.');
+  assert.ok(C.emailText('x '.repeat(2000), 100).length <= 102);
+  assert.match(C.emailText('See https://example.com/' + 'a'.repeat(80)), /https:\/\/example\.com\/…/);
+  assert.equal(C.decodeEntities('You&#39;re &amp; me'), "You're & me");
+});
+
+test('email: items from threads', () => {
+  const now = at(2026, 11, 13, 10);
+  const items = C.mailItems([
+    thread('T1', [msg({ plaintextBody: 'Please sign it.', labelIds: ['INBOX', 'UNREAD', 'CATEGORY_PERSONAL'] })]),
+    thread('T2', [msg({ date: '2026-11-12T01:00:00Z', plaintextBody: 'Question?' }), msg({ sender: 'me@x.com', labelIds: ['SENT'], plaintextBody: 'Answer' })]),
+    { id: 'T3', messages: [msg({ snippet: 'Sale &amp; more', plaintextBody: '' })], viewUrl: 'javascript:alert(1)' },
+    { messages: [] },
+  ], now);
+  assert.equal(items.length, 3);
+  assert.deepEqual(items.map((i) => i.ref), ['e1', 'e2', 'e3']);
+  assert.equal(items[0].from, 'Ms Smith');
+  assert.equal(items[0].unread, true);
+  assert.equal(items[0].category, 'personal');
+  assert.equal(items[0].day, '2026-11-13'); // 23:00 UTC is 10am in Sydney
+  assert.equal(items[1].lastFromMe, true);
+  assert.equal(items[1].text, 'Question?');
+  assert.equal(items[2].text, 'Sale & more');
+  assert.equal(items[2].url, null);
+  const prompt = C.mailPrompt(items, now);
+  assert.match(prompt, /Today is Friday 2026-11-13/);
+  assert.match(prompt, /<email ref="e2">[\s\S]*sent by me/);
+});
+
+test('email: summary is checked, never guessed', () => {
+  const now = at(2026, 11, 13, 10);
+  const items = C.mailItems([thread('T1', [msg({ plaintextBody: 'a' })]), thread('T2', [msg({ plaintextBody: 'b' })]), thread('T3', [msg({ plaintextBody: 'c' })])], now);
+  const s = C.cleanMailSummary({
+    overview: 'Form due Friday.',
+    reply: [{ ref: 'e1', why: 'She asked you to sign' }, { ref: 'e1', why: 'dup' }, { ref: 'e9', why: 'unknown email' }],
+    dates: [{ ref: 'e1', what: 'Form due', day: '2026-11-20', time: null }, { ref: 'e2', what: 'Old', day: '2026-10-01' }, { ref: 'e2', what: 'Bad day', day: 'Friday' }],
+    ignore: [{ ref: 'e1', why: 'also listed as reply' }, { ref: 'e2', why: 'newsletter' }],
+    tasks: [{ ref: 'e1', title: 'Sign the excursion form', day: '2026-11-12', important: 'yes' }, { ref: 'e1', title: 'sign the excursion form', day: null }, { ref: 'e1', title: '  ' }],
+  }, items, now);
+  assert.deepEqual(s.reply, [{ ref: 'e1', why: 'She asked you to sign' }]);
+  assert.deepEqual(s.dates, [{ ref: 'e1', what: 'Form due', day: '2026-11-20', time: null }]);
+  assert.deepEqual(s.ignore, [{ ref: 'e2', why: 'newsletter' }]);
+  assert.deepEqual(s.other, [{ ref: 'e3' }]);
+  assert.equal(s.tasks.length, 1);
+  assert.equal(s.tasks[0].day, '2026-11-13'); // yesterday's deadline becomes today
+  assert.equal(s.tasks[0].important, false);
+  assert.deepEqual(C.cleanMailSummary('nonsense', items, now).other.length, 3);
+});
+
+test('email: suggested task is added once', () => {
+  const now = at(2026, 11, 13, 10);
+  const [item] = C.mailItems([thread('T1', [msg({ plaintextBody: 'a' })])], now);
+  const sug = { ref: 'e1', title: 'Sign the form', day: '2026-11-14', important: true };
+  const data = C.emptyData();
+  assert.equal(C.mailTaskAdded(data, sug, item), false);
+  const t = C.mailTask(sug, item, now);
+  assert.equal(t.dueDay, '2026-11-14');
+  assert.equal(t.fromEmail, 'T1');
+  assert.match(t.details, /Excursion form/);
+  C.addTask(data, t);
+  assert.equal(C.mailTaskAdded(data, sug, item), true);
+  assert.equal(C.cleanData(JSON.parse(JSON.stringify(data))).tasks[0].fromEmail, 'T1'); // kept when saved and read back
+});

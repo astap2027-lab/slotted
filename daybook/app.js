@@ -35,6 +35,9 @@ const ICONS = {
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
   download: '<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5h14"/>',
   sidebar: '<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M15 4.5v15"/>',
+  mail: '<rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/><path d="m4 7 8 6 8-6"/>',
+  reply: '<path d="M10 8 5 12.5l5 4.5"/><path d="M5.5 12.5H14a5 5 0 0 1 5 5v1"/>',
+  external: '<path d="M14 4.5h5.5V10M19.5 4.5 11 13M17 14v4.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 5 18.5v-9A1.5 1.5 0 0 1 6.5 8H11"/>',
 };
 const icon = (name) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] ?? ''}</svg>`;
 const CHECK = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
@@ -73,7 +76,10 @@ const VIEWS = [
   { id: 'inbox', title: 'Inbox', icon: 'tray', key: '3' },
   { id: 'notes', title: 'Notes', icon: 'note', key: '4' },
   { id: 'completed', title: 'Completed', icon: 'done', key: '5' },
+  { id: 'mail', title: 'Email', icon: 'mail', key: '6' },
 ];
+// The Email view needs a host that can read Gmail (the claude.ai page). The website hides it.
+const shownViews = () => VIEWS.filter((v) => v.id !== 'mail' || HOST.mail);
 const SORTS = [['manual', 'Manual'], ['dueDate', 'Date'], ['priority', 'Priority'], ['title', 'Title'], ['created', 'Newest First']];
 const takesEntry = (v) => v === 'today' || v === 'upcoming' || v === 'inbox';
 
@@ -103,6 +109,8 @@ try {
 const ui = {
   view: 'today', taskId: null, noteId: null, search: '', quickText: '', compactText: '',
   importantOnly: false, showArchived: false, now: new Date(), settingsTab: 'general',
+  // Email summary, kept only while the page is open (email text is never saved).
+  mail: { status: 'idle', step: '', error: '', items: [], summary: null, at: null, days: 3, scroll: 0 },
 };
 let installPrompt = null;
 let swReg = null;
@@ -199,7 +207,7 @@ function renderSidebar() {
     </div>
     <label class="search">${icon('search')}<input id="search" type="search" placeholder="Search" value="${esc(ui.search)}" autocomplete="off" spellcheck="false"><kbd>/</kbd></label>
     <nav class="nav">
-      ${VIEWS.map((v) => `<button data-act="view" data-v="${v.id}" class="${ui.view === v.id && !ui.search ? 'on' : ''}" title="${v.title} (${v.key})">
+      ${shownViews().map((v) => `<button data-act="view" data-v="${v.id}" class="${ui.view === v.id && !ui.search ? 'on' : ''}" title="${v.title} (${v.key})">
         ${icon(v.icon)}<span>${v.title}</span>${n[v.id] ? `<span class="count">${n[v.id]}</span>` : ''}</button>`).join('')}
     </nav>
     <div class="side-foot">
@@ -260,6 +268,13 @@ function renderMain() {
   const main = $('#main');
   if (ui.search.trim()) { main.innerHTML = searchHTML(); return; }
   if (ui.view === 'notes') { main.innerHTML = notesHTML(); return; }
+  if (ui.view === 'mail') {
+    const keep = $('#mailScroll')?.scrollTop ?? ui.mail.scroll;
+    main.innerHTML = mailHTML();
+    const sc = $('#mailScroll');
+    if (sc) { sc.scrollTop = keep; sc.onscroll = () => { ui.mail.scroll = sc.scrollTop; }; }
+    return;
+  }
 
   const p = P();
   const view = ui.view;
@@ -402,6 +417,144 @@ function noteEditHTML() {
       </li>`).join('')}
     </ul>
     <div class="cl-add">${icon('plus')}<input id="clAdd" placeholder="Add an item and press Return" aria-label="New checklist item"></div>
+  </div>`;
+}
+
+// ---------- Email summary ----------
+
+const MAIL_RANGES = [[1, 'Last day'], [3, 'Last 3 days'], [7, 'Last week']];
+const MAIL_LIMIT = 20;
+
+function mailError(err) {
+  const code = err?.code;
+  if (err?.sample) {
+    if (code === 'rate_limited') return "You've reached your Claude usage limit for now. Try again later.";
+    if (code === 'session_expired') return 'Sign in to claude.ai again, then try again.';
+    if (['not_granted', 'sampling_disabled', 'not_declared', 'capability_disabled', 'capability_removed'].includes(code)) return "Daybook isn't allowed to use Claude here, so it can't write the summary. Check this page's Permissions menu.";
+    if (code === 'prompt_too_large') return 'Too much email to summarise at once. Try a shorter time range.';
+    return "The summary didn't come back properly. Try again.";
+  }
+  switch (code) {
+    case 'server_not_connected': case 'server_not_found': return "Gmail isn't connected. Add it in claude.ai Settings → Connectors, then try again.";
+    case 'needs_reauth': return 'Gmail needs reconnecting. Open claude.ai Settings → Connectors and reconnect it.';
+    case 'selection_required': return 'Choose which Gmail account to use when claude.ai asks, then try again.';
+    case 'not_in_manifest': case 'approval_required': case 'consent_required': return 'Daybook needs your OK to read Gmail. Press the button again and choose Allow (or check this page\'s Permissions menu).';
+    case 'blocked_by_policy': return "Your organisation doesn't let this page read Gmail.";
+    case 'not_granted': case 'capability_disabled': case 'capability_removed': return "This view can't use your connectors. Open Daybook on claude.ai while signed in.";
+    case 'server_unavailable': case 'rate_limited': return "Gmail didn't answer. Try again in a minute.";
+    default: return "Couldn't read your email just now. Try again.";
+  }
+}
+
+async function readMail() {
+  const m = ui.mail;
+  if (m.status === 'loading' || !HOST.mail) return;
+  const step = (text) => { m.step = text; if (ui.view === 'mail') renderMain(); };
+  Object.assign(m, { status: 'loading', error: '' });
+  step('Finding recent email…');
+  try {
+    const found = await HOST.mail.search(`in:inbox newer_than:${m.days}d`, MAIL_LIMIT);
+    const list = (Array.isArray(found?.threads) ? found.threads : []).slice(0, MAIL_LIMIT);
+    if (!list.length) {
+      Object.assign(m, { status: 'done', items: [], summary: null, at: new Date() });
+      render();
+      return;
+    }
+    step(`Reading ${list.length} email${list.length === 1 ? '' : 's'}…`);
+    const full = new Array(list.length);
+    let next = 0;
+    const worker = async () => {
+      while (next < list.length) {
+        const i = next++;
+        try { full[i] = (await HOST.mail.thread(list[i].id)) ?? list[i]; } catch { full[i] = list[i]; } // fall back to the preview
+      }
+    };
+    await Promise.all([worker(), worker(), worker(), worker()]);
+    const items = C.mailItems(full, new Date());
+    step('Summarising…');
+    const raw = await HOST.mail.ask(C.mailPrompt(items, new Date()));
+    Object.assign(m, { status: 'done', items, summary: C.cleanMailSummary(raw, items, new Date()), at: new Date(), scroll: 0 });
+  } catch (err) {
+    console.error(err);
+    Object.assign(m, { status: m.summary ? 'done' : 'error', error: mailError(err) });
+    if (m.summary) toast(mailError(err));
+  }
+  render();
+}
+
+function addMailTask(i) {
+  const m = ui.mail;
+  const sug = m.summary?.tasks[i];
+  if (!sug) return;
+  const item = m.items.find((x) => x.ref === sug.ref);
+  if (C.mailTaskAdded(data, sug, item)) return;
+  const task = C.mailTask(sug, item);
+  if (!change((d) => C.addTask(d, task))) return;
+  const home = homeOf(task, P());
+  toast(`Added to ${viewTitle(home)}${home === 'upcoming' && task.dueDay ? ' · ' + P().dayTitle(task.dueDay) : ''}`, { label: 'Show', run: () => revealTask(task.id) });
+}
+
+function mailItemHTML(item, line, extra = '') {
+  if (!item) return '';
+  return `<div class="mail-item">
+    <div class="mi-body">
+      <div class="mi-top"><span class="mi-subject">${item.unread ? '<i class="dot" title="Unread"></i>' : ''}${esc(item.subject)}</span>${extra}</div>
+      <div class="mi-from">${esc(item.from)} · ${esc(fmtShort(C.noon(item.day)))}</div>
+      ${line ? `<div class="mi-why">${esc(line)}</div>` : ''}
+    </div>
+    ${item.url ? `<a class="icon-btn" href="${esc(item.url)}" target="_blank" rel="noopener noreferrer" title="Open in Gmail">${icon('external')}</a>` : ''}
+  </div>`;
+}
+
+function mailHTML() {
+  const m = ui.mail;
+  const range = MAIL_RANGES.find((r) => r[0] === m.days)?.[1] ?? 'Last 3 days';
+  const busy = m.status === 'loading';
+  const head = `<header class="head">
+      <div><div class="eyebrow">Gmail · read only</div><h1>Email</h1></div>
+      <div class="right"><div class="tools">
+        <button class="tool" data-act="mailRange" title="How far back to read" ${busy ? 'disabled' : ''}>${icon('calendar')}${esc(range)}</button>
+        <button class="tool primary" data-act="readMail" ${busy ? 'disabled' : ''}>${icon('mail')}${m.status === 'done' ? 'Refresh' : 'Read my email'}</button>
+      </div></div>
+    </header>`;
+  if (busy) return head + `<div class="empty"><div><div class="big spin">${icon('mail')}</div><h2>${esc(m.step)}</h2><p>This takes about half a minute.</p></div></div>`;
+  if (m.status === 'error') return head + `<div class="empty"><div><div class="big">${icon('alert')}</div><h2>Couldn't make the summary</h2><p>${esc(m.error)}</p>
+    <p style="margin-top:14px"><button class="btn primary" data-act="readMail">Try again</button></p></div></div>`;
+  if (m.status === 'idle') return head + `<div class="empty"><div><div class="big">${icon('mail')}</div><h2>Summarise your recent email</h2>
+    <p>When you press the button, Daybook reads your Gmail inbox (${esc(range.toLowerCase())}), sorts out what needs a reply, deadlines and events, and what's safe to ignore, and suggests tasks you can add with one click.</p>
+    <p style="margin-top:8px">It only reads. It can't send, delete or change any email, and nothing from your email is saved.</p>
+    <p style="margin-top:14px"><button class="btn primary" data-act="readMail">Read my email</button></p></div></div>`;
+  if (!m.items.length || !m.summary) return head + `<div class="empty"><div><div class="big">${icon('done')}</div><h2>No email in your inbox from the ${esc(range.toLowerCase())}</h2><p>Try a longer time range.</p></div></div>`;
+
+  const s = m.summary;
+  const byRef = new Map(m.items.map((i) => [i.ref, i]));
+  const p = P();
+  const when = m.at ? fmtTime(m.at) : '';
+  const section = (title, count, inner, cls = '') => (count ? `<section class="group mail-group ${cls}"><h3>${esc(title)} <span class="count">${count}</span></h3>${inner}</section>` : '');
+  const tasks = s.tasks.map((t, i) => {
+    const item = byRef.get(t.ref);
+    const added = C.mailTaskAdded(data, t, item);
+    return `<li class="row sug ${added ? 'done' : ''}">
+      <button class="check ${added ? 'on' : ''} ${t.important ? 'p2' : ''}" data-act="mailAdd" data-i="${i}" ${added ? 'disabled' : ''} title="${added ? 'Added' : 'Add this task'}" aria-label="${added ? 'Added' : 'Add this task'}">${added ? CHECK : `<svg viewBox="0 0 24 24" aria-hidden="true" class="plus-mark"><path d="M12 6v12M6 12h12"/></svg>`}</button>
+      <div class="row-body">
+        <div class="row-title"><span>${esc(t.title)}</span></div>
+        <div class="row-meta"><span>${icon('calendar')}${t.day ? esc(p.dayTitle(t.day)) : 'No date (Inbox)'}</span>${t.important ? '<span>★ Important</span>' : ''}${item ? `<span>${icon('mail')}${esc(item.subject)}</span>` : ''}</div>
+      </div>
+      ${added ? '<span class="hint">Added</span>' : `<button class="btn small" data-act="mailAdd" data-i="${i}">Add</button>`}
+    </li>`;
+  }).join('');
+  const open = s.tasks.filter((t) => !C.mailTaskAdded(data, t, byRef.get(t.ref))).length;
+
+  return head + `<div class="scroll" id="mailScroll">
+    <div class="card mail-overview">
+      ${s.overview ? `<div>${esc(s.overview)}</div>` : ''}
+      <div class="hint">Read ${m.items.length} email${m.items.length === 1 ? '' : 's'} from the ${esc(range.toLowerCase())} at ${esc(when)}. Written by Claude, so check anything important in Gmail.</div>
+    </div>
+    ${section('Suggested tasks', s.tasks.length, `<ul class="rows">${tasks}</ul>${open > 1 ? `<div style="padding:4px 12px"><button class="btn small" data-act="mailAddAll">Add all ${open}</button></div>` : ''}`)}
+    ${section('Needs a reply', s.reply.length, s.reply.map((r) => mailItemHTML(byRef.get(r.ref), r.why, icon('reply'))).join(''))}
+    ${section('Deadlines and events', s.dates.length, s.dates.map((d) => mailItemHTML(byRef.get(d.ref), d.what, `<span class="mi-day ${C.daysBetween(p.today, d.day) <= 1 ? 'soon' : ''}">${esc(p.dayTitle(d.day))}${d.time ? ' · ' + esc(d.time) : ''}</span>`)).join(''))}
+    ${section('Other email', s.other.length, s.other.map((o) => mailItemHTML(byRef.get(o.ref), '')).join(''))}
+    ${s.ignore.length ? `<details class="group mail-group" id="mailIgnore" ${ui.mail.ignoreOpen ? 'open' : ''}><summary><h3>Safe to ignore <span class="count">${s.ignore.length}</span></h3></summary>${s.ignore.map((x) => mailItemHTML(byRef.get(x.ref), x.why)).join('')}</details>` : ''}
   </div>`;
 }
 
@@ -915,7 +1068,7 @@ function renderSettings() {
   } else {
     body = `<div class="kbd-list">
       <span>New task</span><span>N</span><span>New note</span><span>Shift N</span>
-      <span>Search</span><span>/ or ⌘F</span><span>Today · Upcoming · Inbox · Notes · Completed</span><span>1 – 5</span>
+      <span>Search</span><span>/ or ⌘F</span><span>${esc(shownViews().map((v) => v.title).join(' · '))}</span><span>1 – ${shownViews().length}</span>
       <span>Mark selected done</span><span>Space</span><span>Mark selected important</span><span>I</span>
       <span>Edit selected</span><span>Return</span><span>Delete selected</span><span>Delete</span>
       <span>Move selection</span><span>↑ ↓</span><span>Close editor or search</span><span>Esc</span></div>`;
@@ -1015,6 +1168,20 @@ const ACTIONS = {
   cnToggle: (b) => { const li = b.closest('[data-item]'); change((d) => C.updateNote(d, li.dataset.note, (n) => { const i = n.checklist.find((x) => x.id === li.dataset.item); if (i) i.isDone = !i.isDone; })); },
   alertDone: (b) => { const id = b.closest('.alert').dataset.id; change((d) => C.setCompleted(d, id, true)); toast('Marked as done'); },
   alertSnooze: (b) => snoozeTask(b.closest('.alert').dataset.id, b.dataset.v),
+  readMail: () => readMail(),
+  mailRange: (b) => {
+    const r = b.getBoundingClientRect();
+    openMenu(r.left, r.bottom + 4, [{ label: 'Read email from' }, ...MAIL_RANGES.map(([d, l]) => ({ title: l, checked: ui.mail.days === d, run: () => { ui.mail.days = d; renderMain(); } }))]);
+  },
+  mailAdd: (b) => addMailTask(+b.dataset.i),
+  mailAddAll: () => {
+    const s = ui.mail.summary;
+    if (!s) return;
+    const fresh = s.tasks.map((t) => ({ t, item: ui.mail.items.find((x) => x.ref === t.ref) })).filter(({ t, item }) => !C.mailTaskAdded(data, t, item));
+    if (!fresh.length) return;
+    change((d) => { for (const { t, item } of fresh) C.addTask(d, C.mailTask(t, item)); });
+    toast(`Added ${fresh.length} tasks`);
+  },
   alertDismiss: (b) => { const id = b.closest('.alert').dataset.id; change((d) => C.updateTask(d, id, (t) => { t.reminderDismissed = t.reminder; })); },
 };
 
@@ -1202,12 +1369,12 @@ document.addEventListener('keydown', (e) => {
   if (k === '/' ) { e.preventDefault(); $('#search')?.focus(); return; }
   if (k === 'n') { e.preventDefault(); focusQuick(); return; }
   if (k === 'N') { e.preventDefault(); newNoteAction(); return; }
-  const v = VIEWS.find((x) => x.key === k);
+  const v = shownViews().find((x) => x.key === k);
   if (v) { e.preventDefault(); setView(v.id); return; }
 
   const sel = C.findTask(data, ui.taskId);
   if (k === 'ArrowDown' || k === 'ArrowUp') {
-    const ids = $$('#main .row').map((r) => r.dataset.id);
+    const ids = $$('#main .row[data-id]').map((r) => r.dataset.id);
     if (!ids.length) return;
     e.preventDefault();
     const i = ids.indexOf(ui.taskId);
@@ -1222,6 +1389,9 @@ document.addEventListener('keydown', (e) => {
   if (k === 'Enter') { e.preventDefault(); $('#fTitle')?.focus(); return; }
   if (k === 'Delete' || k === 'Backspace') { e.preventDefault(); deleteTaskWithUndo(sel.id); }
 });
+
+// Remember whether "Safe to ignore" is open across redraws.
+document.addEventListener('toggle', (e) => { if (e.target.id === 'mailIgnore') ui.mail.ignoreOpen = e.target.open; }, true);
 
 // Drag to reorder (when sorted Manually).
 let dragId = null;

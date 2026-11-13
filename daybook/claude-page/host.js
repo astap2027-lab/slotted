@@ -106,6 +106,33 @@ window.DAYBOOK_HOST = (() => {
     },
     onChange(f) { changeListeners.push(f); },
     onStatus(f) { statusListeners.push(f); },
+    // Email summary. Read-only on purpose: the page is only allowed Gmail's
+    // search_threads and get_thread, so it cannot send, delete or change email.
+    mail: {
+      async search(query, pageSize) {
+        const mcp = await window.claude?.use?.('mcp');
+        if (!mcp) throw { code: 'not_granted' };
+        const input = { query, pageSize, view: 'THREAD_VIEW_SUMMARY' };
+        try {
+          return (await mcp.callTool('Gmail', 'search_threads', input, { cache: false })).payload;
+        } catch (err) {
+          if (!err?.retryable) throw err;
+          await new Promise((r) => setTimeout(r, Math.min(err.retryAfterMs ?? 0, 8000) + 800 + Math.random() * 800));
+          return (await mcp.callTool('Gmail', 'search_threads', input, { cache: false })).payload;
+        }
+      },
+      async thread(threadId) {
+        const mcp = await window.claude?.use?.('mcp');
+        if (!mcp) throw { code: 'not_granted' };
+        return (await mcp.callTool('Gmail', 'get_thread', { threadId, messageFormat: 'PLAIN_TEXT' }, { cache: false })).payload;
+      },
+      async ask(prompt) {
+        const sample = await window.claude?.use?.('sample');
+        if (!sample) throw { code: 'not_granted', sample: true };
+        try { return await sample.json(prompt, { modelTier: 'default', cache: false }); }
+        catch (err) { throw { ...err, sample: true }; }
+      },
+    },
     async saveFile(filename, text) {
       const d = await window.claude?.use?.('downloads');
       if (!d) throw { message: 'Saving files is not available here.' };
