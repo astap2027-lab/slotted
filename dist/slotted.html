@@ -3456,6 +3456,14 @@ function calendarBlocks(events, cal, rules = {}, key) {
   const dayOf = (date) => { const d = dateNum(date) - monday; return d >= 0 && d <= 6 ? d : null; };
   const out = [];
   const school = new Map(); // day -> merged classes (School calendars)
+  const single = (e, rule, label, day) => {
+    const type = rule.type || (cal.type && !['auto', 'school'].includes(cal.type) ? cal.type : guessType(label));
+    return {
+      id: `cal:${cal.id}:${e.uid || label}:${e.date}:${e.startTime}`, day, start: e.startTime, end: e.endTime, type, label, calId: cal.id, calName: cal.name,
+      ...(type === 'sport' ? { intensity: sportEffort(rule.intensity || guessEffort(label)) } : {}),
+      ...(rule.flex ? { flex: true } : {}),
+    };
+  };
   // "Work it out" treats a calendar that reads as a school timetable as one.
   const asSchool = cal.type === 'school' || ((!cal.type || cal.type === 'auto') && looksLikeSchool(events));
   for (const e of events || []) {
@@ -3478,17 +3486,16 @@ function calendarBlocks(events, cal, rules = {}, key) {
     if (asSchool && !rule.type && classLike(e)) {
       if (CAL_FREE.test(label)) continue;
       const m = school.get(day);
-      school.set(day, m ? { start: e.startTime < m.start ? e.startTime : m.start, end: e.endTime > m.end ? e.endTime : m.end, n: m.n + 1 } : { start: e.startTime, end: e.endTime, n: 1 });
+      school.set(day, m ? { start: e.startTime < m.start ? e.startTime : m.start, end: e.endTime > m.end ? e.endTime : m.end, n: m.n + 1, items: [...m.items, { e, rule, label }] } : { start: e.startTime, end: e.endTime, n: 1, items: [{ e, rule, label }] });
       continue;
     }
-    const type = rule.type || (cal.type && !['auto', 'school'].includes(cal.type) ? cal.type : guessType(label));
-    out.push({
-      id: `cal:${cal.id}:${e.uid || label}:${e.date}:${e.startTime}`, day, start: e.startTime, end: e.endTime, type, label, calId: cal.id, calName: cal.name,
-      ...(type === 'sport' ? { intensity: sportEffort(rule.intensity || guessEffort(label)) } : {}),
-      ...(rule.flex ? { flex: true } : {}),
-    });
+    out.push(single(e, rule, label, day));
   }
-  for (const [day, m] of school) out.push({ id: `cal:${cal.id}:school:${day}`, day, start: m.start, end: m.end, type: 'school', label: 'School', merged: true, classes: m.n, calId: cal.id, calName: cal.name });
+  // A school day needs at least two classes; a lone event (say, a lunchtime meeting) stays as itself.
+  for (const [day, m] of school) {
+    if (m.n >= 2) out.push({ id: `cal:${cal.id}:school:${day}`, day, start: m.start, end: m.end, type: 'school', label: 'School', merged: true, classes: m.n, calId: cal.id, calName: cal.name });
+    else for (const it of m.items) out.push(single(it.e, it.rule, it.label, day));
+  }
   return out.sort((a, b) => a.day - b.day || toMin(a.start) - toMin(b.start));
 }
 
@@ -4738,7 +4745,7 @@ const MUSCLE_LABEL = Object.fromEntries(MUSCLES.map((m) => [m.id, m.label]));
 const fmtNum = (n) => Math.round(n).toLocaleString('en-AU');
 const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 // The release number. It must match CACHE in sw.js (a test checks); shown at the bottom of Settings.
-const APP_VERSION = 35;
+const APP_VERSION = 36;
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const subnav = (cur) => `<nav class="subnav" aria-label="Training">${[['plan', 'This week'], ['week', 'My week'], ['routine', 'Routine'], ['library', 'Library']]
   .map(([v, t]) => `<a href="#${v}" ${v === cur ? 'aria-current="page"' : ''}>${t}</a>`).join('')}</nav>`;
@@ -5150,6 +5157,9 @@ function renderWeek() {
   const blocks = state.blocks[editingWeek];
   const byDay = DAYS.map((_, d) => blocks.filter((b) => b.day === d).sort((a, b) => toMin(a.start) - toMin(b.start)));
   const hasSchool = blocks.some((b) => b.type === 'school');
+  // With calendars connected, each real week is filled from them; the list here is only the usual, typed-in week.
+  const fromCal = calList().length > 0;
+  const calSchool = fromCal && [currentWeek(), addWeeks(currentWeek(), 1)].some((wk) => ((state.history[wk] || {}).cal || []).some((b) => b.merged));
   const rest = state.restDays || [];
   const split = splitSummary();
 
@@ -5168,6 +5178,7 @@ function renderWeek() {
     <div class="stack">
       <section class="card">
         <div class="card-head"><h2>Commitments${state.useAB ? `, Week ${editingWeek}` : ''}</h2></div>
+        ${fromCal ? `<p class="small muted">${blocks.length ? 'Your usual week. Your calendar adds to it each week (see From your calendars).' : 'Nothing typed in here. Each week is filled in from your calendar; see From your calendars. Add anything that isn’t in your calendar.'}</p>` : ''}
         <div class="daylist">
           ${DAYS.map((name, d) => `
           <div class="dayrow">
@@ -5177,7 +5188,7 @@ function renderWeek() {
                 <span class="item ${b.type}${b.flex ? ' flex' : ''}">
                   <button type="button" class="item-edit" data-edit="${b.id}" aria-expanded="${editingBlock === b.id}" aria-label="Edit ${esc(b.label)} on ${name}"><span>${esc(b.label)}, ${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}${b.type === 'sport' && b.intensity === 'hard' && !/game|race|match/i.test(b.label) ? ' <b class="tag">Game</b>' : ''}${b.type === 'sport' && b.intensity === 'easy' ? ' <b class="tag">Easy</b>' : ''}${blockTags(b)}</span></button>
                   <button type="button" data-del="${b.id}" aria-label="Remove ${esc(b.label)} on ${name}">×</button>
-                </span>`).join('') : '<span class="empty">Free</span>'}
+                </span>`).join('') : `<span class="empty">${fromCal ? 'Nothing typed in' : 'Free'}</span>`}
             </div>
             ${byDay[d].some((b) => b.id === editingBlock) ? blockEditor(byDay[d].find((b) => b.id === editingBlock)) : ''}
           </div>`).join('')}
@@ -5194,7 +5205,7 @@ function renderWeek() {
       ${availHtml()}
       ${calendarCard()}
       ${oneOffCard()}
-      ${hasSchool ? '' : `
+      ${hasSchool || calSchool ? '' : `
       <section class="card stack">
         <h2>Start with school</h2>
         <div class="row">

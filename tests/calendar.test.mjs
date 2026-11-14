@@ -164,3 +164,11 @@ test('a real school feed reads as one School block a day; study, cancelled and a
   // The same calendar marked "School timetable" gives the same result.
   assert.deepEqual(calendarBlocks(evs, { id: 's', name: 'Compass', type: 'school' }, {}, KEY).map((b) => b.label), blocks.map((b) => b.label));
 });
+
+test('a lone class-like event on a school calendar stays as itself, not a one-class School day', () => {
+  const evs = events(axelWeek);
+  const wedOnly = evs.filter((e) => e.date !== '2026-11-18' || e.title === 'SOTWEG in W33');
+  const blocks = calendarBlocks(wedOnly, { id: 's', name: 'Compass', type: 'auto' }, {}, KEY);
+  assert.deepEqual(blocks.filter((b) => b.day === 2).map((b) => `${b.start}-${b.end} ${b.label}${b.merged ? ' merged' : ''}`), ['13:05-13:35 SOTWEG in W33']);
+  assert.ok(blocks.filter((b) => b.day === 1).every((b) => b.merged), 'days with real classes still merge');
+});

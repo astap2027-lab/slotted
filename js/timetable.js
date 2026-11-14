@@ -84,6 +84,14 @@ export function calendarBlocks(events, cal, rules = {}, key) {
   const dayOf = (date) => { const d = dateNum(date) - monday; return d >= 0 && d <= 6 ? d : null; };
   const out = [];
   const school = new Map(); // day -> merged classes (School calendars)
+  const single = (e, rule, label, day) => {
+    const type = rule.type || (cal.type && !['auto', 'school'].includes(cal.type) ? cal.type : guessType(label));
+    return {
+      id: `cal:${cal.id}:${e.uid || label}:${e.date}:${e.startTime}`, day, start: e.startTime, end: e.endTime, type, label, calId: cal.id, calName: cal.name,
+      ...(type === 'sport' ? { intensity: sportEffort(rule.intensity || guessEffort(label)) } : {}),
+      ...(rule.flex ? { flex: true } : {}),
+    };
+  };
   // "Work it out" treats a calendar that reads as a school timetable as one.
   const asSchool = cal.type === 'school' || ((!cal.type || cal.type === 'auto') && looksLikeSchool(events));
   for (const e of events || []) {
@@ -106,17 +114,16 @@ export function calendarBlocks(events, cal, rules = {}, key) {
     if (asSchool && !rule.type && classLike(e)) {
       if (CAL_FREE.test(label)) continue;
       const m = school.get(day);
-      school.set(day, m ? { start: e.startTime < m.start ? e.startTime : m.start, end: e.endTime > m.end ? e.endTime : m.end, n: m.n + 1 } : { start: e.startTime, end: e.endTime, n: 1 });
+      school.set(day, m ? { start: e.startTime < m.start ? e.startTime : m.start, end: e.endTime > m.end ? e.endTime : m.end, n: m.n + 1, items: [...m.items, { e, rule, label }] } : { start: e.startTime, end: e.endTime, n: 1, items: [{ e, rule, label }] });
       continue;
     }
-    const type = rule.type || (cal.type && !['auto', 'school'].includes(cal.type) ? cal.type : guessType(label));
-    out.push({
-      id: `cal:${cal.id}:${e.uid || label}:${e.date}:${e.startTime}`, day, start: e.startTime, end: e.endTime, type, label, calId: cal.id, calName: cal.name,
-      ...(type === 'sport' ? { intensity: sportEffort(rule.intensity || guessEffort(label)) } : {}),
-      ...(rule.flex ? { flex: true } : {}),
-    });
+    out.push(single(e, rule, label, day));
   }
-  for (const [day, m] of school) out.push({ id: `cal:${cal.id}:school:${day}`, day, start: m.start, end: m.end, type: 'school', label: 'School', merged: true, classes: m.n, calId: cal.id, calName: cal.name });
+  // A school day needs at least two classes; a lone event (say, a lunchtime meeting) stays as itself.
+  for (const [day, m] of school) {
+    if (m.n >= 2) out.push({ id: `cal:${cal.id}:school:${day}`, day, start: m.start, end: m.end, type: 'school', label: 'School', merged: true, classes: m.n, calId: cal.id, calName: cal.name });
+    else for (const it of m.items) out.push(single(it.e, it.rule, it.label, day));
+  }
   return out.sort((a, b) => a.day - b.day || toMin(a.start) - toMin(b.start));
 }
 
