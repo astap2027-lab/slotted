@@ -153,3 +153,7 @@ test('the coach knows where sessions show and that next week is a draft until Mo
   assert.match(COACH_INSTRUCTIONS, /becomes the real plan on Monday/);
   assert.match(COACH_INSTRUCTIONS, /Never point them to a screen or button that isn't described here/);
 });
+
+test('a moved session is marked in the coach’s plan lines', () => {
+  assert.match(planLines([{ day: 3, start: 880, end: 940, name: 'Chest and back', pinned: true, notes: [] }])[0], /moved by the athlete/);
+});

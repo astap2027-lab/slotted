@@ -985,3 +985,4 @@ td .effort-opts { max-width: 300px; }
 /* ---------- gym sessions in My week ---------- */
 .item.gym { box-shadow: inset 3px 0 0 var(--lime); text-decoration: none; color: inherit; }
 a.item.gym:hover { border-color: var(--lime-line); }
+.item.gym .item-edit, .item.gym .item-edit span { text-decoration: none; }

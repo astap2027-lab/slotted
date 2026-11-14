@@ -992,6 +992,7 @@ td .effort-opts { max-width: 300px; }
 /* ---------- gym sessions in My week ---------- */
 .item.gym { box-shadow: inset 3px 0 0 var(--lime); text-decoration: none; color: inherit; }
 a.item.gym:hover { border-color: var(--lime-line); }
+.item.gym .item-edit, .item.gym .item-edit span { text-decoration: none; }
 
 </style>
 <div class="shell">
@@ -2211,8 +2212,19 @@ function streakInfo(history, currentKey, target, sportCreditFor) {
 
 // Planned sessions as rows for a week view: sorted by day and time, marked as a draft (next week) or done.
 function sessionRows(plan, { draft = false, done = [] } = {}) {
-  return (plan || []).map((s) => ({ key: s.key, name: s.name, day: s.day, start: s.start, end: s.end, short: !!s.short, draft, done: done.includes(s.key) }))
+  return (plan || []).map((s) => ({ key: s.key, name: s.name, day: s.day, start: s.start, end: s.end, short: !!s.short, draft, done: done.includes(s.key), moved: !!s.pinned }))
     .sort((a, b) => a.day - b.day || a.start - b.start);
+}
+
+// Sessions the athlete moved themselves (pins: { [key]: { day, start, end } }) taken from a first planner run and put
+// at their chosen times. The planner then places the rest around them (`fixed`).
+function pinnedPlan(base, pins = {}) {
+  const pinned = [];
+  for (const s of base || []) {
+    const p = pins[s.key];
+    if (p && Number.isInteger(p.day) && p.end > p.start) pinned.push({ ...s, day: p.day, start: p.start, end: p.end, pinned: true, short: s.short });
+  }
+  return { pinned, pinnedKeys: new Set(pinned.map((s) => s.key)) };
 }
 
 // ---- js/anatomy.js ----
@@ -4595,7 +4607,7 @@ function windowLines(days, minLen = 45) {
 
 // Planned sessions as short lines (day, start time, name and the planner's notes), without exercises.
 function planLines(sessions) {
-  return (sessions || []).slice().sort((a, b) => a.day - b.day).map((s) => `- ${DAYS_SHORT[s.day]} ${fmtTime(s.start)} to ${fmtTime(s.end)} ${s.name}${s.notes && s.notes.length ? ` (${s.notes.join('; ')})` : ''}`);
+  return (sessions || []).slice().sort((a, b) => a.day - b.day).map((s) => `- ${DAYS_SHORT[s.day]} ${fmtTime(s.start)} to ${fmtTime(s.end)} ${s.name}${s.pinned ? ' (moved by the athlete)' : ''}${s.notes && s.notes.length ? ` (${s.notes.join('; ')})` : ''}`);
 }
 
 const STARTERS = [
@@ -4786,6 +4798,8 @@ function mergeStates(local, server) {
     if (!n.plan && o.plan) n.plan = clone(o.plan);
     // Commitments read from a connected calendar: the newer copy wins; keep the other's if the newer has none.
     if (!n.cal && o.cal) n.cal = clone(o.cal);
+    // Next-week sessions the athlete moved: keep the other copy's if the newer has none.
+    if (!n.pins && o.pins) n.pins = clone(o.pins);
   }
 
   out.log = clone(newer.log || {});
@@ -4883,7 +4897,7 @@ const MUSCLE_LABEL = Object.fromEntries(MUSCLES.map((m) => [m.id, m.label]));
 const fmtNum = (n) => Math.round(n).toLocaleString('en-AU');
 const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 // The release number. It must match CACHE in sw.js (a test checks); shown at the bottom of Settings.
-const APP_VERSION = 40;
+const APP_VERSION = 41;
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const subnav = (cur) => `<nav class="subnav" aria-label="Training">${[['plan', 'This week'], ['week', 'My week'], ['routine', 'Routine'], ['library', 'Library']]
   .map(([v, t]) => `<a href="#${v}" ${v === cur ? 'aria-current="page"' : ''}>${t}</a>`).join('')}</nav>`;
@@ -5325,7 +5339,7 @@ function renderWeek() {
     <div class="stack">
       <section class="card">
         <div class="card-head"><h2>${state.useAB ? `Week ${editingWeek}` : 'Your week'}</h2><span class="label">${fmtDate(keyToDate(viewKey))} to ${fmtDate(viewEnd)}</span></div>
-        ${gymRows.length ? `<p class="small muted">${isDraft ? 'Gym sessions for next week are a draft until Monday. They follow any change to your calendar or commitments.' : 'Gym sessions are this week’s plan. Tap one to open it; move or lock it on This week.'}</p>` : ''}
+        ${gymRows.length ? `<p class="small muted">${isDraft ? 'Gym sessions for next week are a draft until Monday. They follow any change to your calendar or commitments. Tap one to move it; Slotted keeps it there and fits the others around it.' : 'Gym sessions are this week’s plan. Tap one to move it or open the workout.'}</p>` : ''}
         ${fromCal ? `<p class="small muted">Items marked <span class="tag cal-tag">Calendar</span> come from your calendar for that week; tap one to say how Slotted should treat it, and change it in your calendar app. Anything you add here repeats every ${state.useAB ? `Week ${editingWeek}` : 'week'}.</p>
         ${state.useAB ? '' : `<div class="seg seg-small" role="group" aria-label="Which week's calendar">${[[false, 'This week'], [true, 'Next week']].map(([v, t]) => `<button type="button" data-myweek="${v ? 1 : 0}" aria-pressed="${myWeekNext === v}">${t}</button>`).join('')}</div>`}` : ''}
         <div class="daylist">
@@ -5339,6 +5353,7 @@ function renderWeek() {
             </div>
             ${byDay[d].some((b) => b.id === editingBlock) ? blockEditor(byDay[d].find((b) => b.id === editingBlock)) : ''}
             ${calByDay[d].some((b) => b.id === editingCal) ? calRuleForm(calByDay[d].find((b) => b.id === editingCal)) : ''}
+            ${gymByDay[d].some((r) => r.key === editingGym) ? gymMoveForm(gymByDay[d].find((r) => r.key === editingGym), viewKey) : ''}
           </div>`).join('')}
         </div>
       </section>
@@ -5419,7 +5434,8 @@ function renderWeek() {
     </div>
   </div>`;
 
-  app.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => { editingWeek = b.dataset.tab; editingBlock = null; editingCal = null; renderWeek(); }));
+  app.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => { editingWeek = b.dataset.tab; editingBlock = null; editingCal = null; editingGym = null; renderWeek(); }));
+  wireGymMoves(viewKey);
   app.querySelectorAll('[data-myweek]').forEach((b) => b.addEventListener('click', () => { myWeekNext = b.dataset.myweek === '1'; editingCal = null; renderWeek(); }));
   wireAvail(renderWeek);
   wireWeekExtras();
@@ -5567,7 +5583,8 @@ function ensurePlan(key) {
   if (!e.plan) {
     // A plan first made partway through the current week starts from today, so days already gone never show as missed.
     const midWeek = key === currentWeek() ? { fromDay: todayIndex(), nowMin: nowMin() } : {};
-    const res = planWithFlex(state.profile, blocksFor(key), state.window, { busy: e.busy, skipDays: allSkip(e), keys: keysFor(key, e.busy), keepOrder: keepOrder(), dayWindows: dayWindows(state, key), ...midWeek });
+    // Sessions moved while this week was still a draft keep their times.
+    const res = planWithPins(key, { busy: e.busy, skipDays: allSkip(e), keys: keysFor(key, e.busy), keepOrder: keepOrder(), dayWindows: dayWindows(state, key), ...midWeek });
     e.plan = res.sessions;
     e.warnings = res.warnings;
     e.inputs = inputs;
@@ -6452,11 +6469,95 @@ function nextWeekCard() {
   </section>`;
 }
 
-// A gym session in a My week day row: this week's opens the workout; next week's is a draft.
+// ---------- moving sessions ----------
+// Why a session can't go at that day and time in a week (or '' when it can).
+function canMoveTo(wk, plan, s, day, start) {
+  const len = s.end - s.start;
+  if (wk === currentWeek()) {
+    if (day < todayIndex()) return 'That day has already gone.';
+    if (day === todayIndex() && start <= nowMin()) return 'Pick a time later today, or another day.';
+  }
+  if (plan.some((x) => x.key !== s.key && x.day === day)) return 'There’s already a session that day.';
+  const w = windowFor(state, wk, day);
+  const fits = freeGaps(weekBlocks(state, wk), day, w).some(([a, z]) => start >= a && start + len <= z);
+  return fits ? '' : `That clashes with a commitment or falls outside your training hours (${fmtTime(toMin(w.start))} to ${fmtTime(toMin(w.end))}).`;
+}
+// This week's session: move it and pin it (the planner and suggestions leave it there).
+function moveThisWeek(s, day, start) {
+  const key = currentWeek();
+  const entry = ensurePlan(key);
+  Object.assign(s, { day, start, end: start + (s.end - s.start), pinned: true });
+  s.notes = rebuildNotes(s, blocksFor(key));
+  entry.plan.sort((a, z) => a.day - z.day);
+}
+let editingGym = null; // the session whose move form is open on My week
+
+function gymMoveForm(r, wk) {
+  const draft = wk !== currentWeek();
+  const plan = draft ? nextWeekDraft(currentWeek()).plan : ensurePlan(currentWeek()).plan;
+  const taken = new Set(plan.filter((x) => x.key !== r.key).map((x) => x.day));
+  const first = draft ? 0 : todayIndex();
+  const days = DAYS.map((n, d) => ({ n, d })).filter(({ d }) => d >= first && !taken.has(d));
+  return `<form class="cal-rule stack" data-gymform="${esc(r.key)}">
+    <p class="small muted">Move ${esc(r.name)}${draft ? ' (next week)' : ''}. It has to fit around your commitments and training hours.</p>
+    <div class="row">
+      <div class="field"><label for="gm-day">Day</label><select id="gm-day" name="day">${days.map(({ n, d }) => `<option value="${d}" ${d === r.day ? 'selected' : ''}>${n}</option>`).join('')}</select></div>
+      <div class="field"><label for="gm-time">Start time</label><input id="gm-time" name="time" type="time" step="300" value="${toHHMM(r.start)}"></div>
+    </div>
+    <p class="errors" id="gm-err" role="alert"></p>
+    <div class="actions"><button type="submit" class="primary">Move</button>${r.moved ? '<button type="button" class="ghost" data-gymreset>Put back</button>' : ''}<button type="button" class="ghost" data-gymclose>Cancel</button>${draft ? '' : `<a class="btn ghost" href="${workoutHref(r, r.done)}">Open workout</a>`}</div>
+  </form>`;
+}
+
+function wireGymMoves(viewKey) {
+  app.querySelectorAll('[data-gymedit]').forEach((b) => b.addEventListener('click', () => { editingGym = editingGym === b.dataset.gymedit ? null : b.dataset.gymedit; renderWeek(); }));
+  app.querySelectorAll('[data-gymclose]').forEach((b) => b.addEventListener('click', () => { editingGym = null; renderWeek(); }));
+  const form = app.querySelector('[data-gymform]');
+  if (!form) return;
+  const sk = form.dataset.gymform;
+  const draft = viewKey !== currentWeek();
+  const nk = addWeeks(currentWeek(), 1);
+  form.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const day = Number(form.day.value);
+    const time = form.time.value;
+    const err = form.querySelector('#gm-err');
+    if (!time) { err.textContent = 'Pick a start time.'; return; }
+    const start = toMin(time);
+    const plan = draft ? nextWeekDraft(currentWeek()).plan : ensurePlan(currentWeek()).plan;
+    const s = plan.find((x) => x.key === sk);
+    if (!s) { editingGym = null; renderWeek(); return; }
+    const problem = canMoveTo(draft ? nk : currentWeek(), plan, s, day, start);
+    if (problem) { err.textContent = problem; return; }
+    if (draft) {
+      const e = (state.history[nk] = state.history[nk] || {});
+      e.pins = { ...(e.pins || {}), [sk]: { day, start, end: start + (s.end - s.start) } };
+    } else moveThisWeek(s, day, start);
+    editingGym = null;
+    commit(); renderWeek(); renderSideWeek();
+    toast(`${s.name} moved to ${draft ? 'next ' : ''}${DAYS[day]}, ${fmtTime(start)}`);
+  });
+  const reset = form.querySelector('[data-gymreset]');
+  if (reset) reset.addEventListener('click', () => {
+    if (draft) {
+      const e = state.history[nk] || {};
+      if (e.pins) { delete e.pins[sk]; if (!Object.keys(e.pins).length) delete e.pins; }
+    } else {
+      const entry = ensurePlan(currentWeek());
+      const s = entry.plan.find((x) => x.key === sk);
+      if (s) { s.pinned = false; replan(currentWeek()); }
+    }
+    editingGym = null;
+    commit(); renderWeek(); renderSideWeek();
+    toast('Put back. Slotted will place it again.');
+  });
+}
+
+// A gym session in a My week day row: tap to move it (this week's form also opens the workout).
 function gymItem(r) {
-  const label = `Gym: ${esc(r.name)}, ${fmtTime(r.start)} to ${fmtTime(r.end)}${r.done ? ' <b class="tag">Done</b>' : ''}${r.draft ? ' <b class="tag">Draft</b>' : ''}`;
-  return r.draft ? `<span class="item gym"><span class="item-edit"><span>${label}</span></span></span>`
-    : `<a class="item gym" href="${workoutHref(r, r.done)}"><span class="item-edit"><span>${label}</span></span></a>`;
+  const label = `Gym: ${esc(r.name)}, ${fmtTime(r.start)} to ${fmtTime(r.end)}${r.done ? ' <b class="tag">Done</b>' : ''}${r.moved ? ' <b class="tag">Moved</b>' : ''}${r.draft ? ' <b class="tag">Draft</b>' : ''}`;
+  if (r.done) return `<a class="item gym" href="${workoutHref(r, true)}"><span class="item-edit"><span>${label}</span></span></a>`;
+  return `<span class="item gym"><button type="button" class="item-edit" data-gymedit="${esc(r.key)}" aria-expanded="${editingGym === r.key}" aria-label="Move ${esc(r.name)}"><span>${label}</span></button></span>`;
 }
 
 // A typed-in commitment in a My week day row.
@@ -7261,15 +7362,9 @@ function wireSessionActions(rerender, opts = {}) {
     const err = document.getElementById(`mv-err-${s.key}`);
     if (!time) { err.textContent = 'Pick a start time.'; return; }
     const start = toMin(time);
-    const len = s.end - s.start;
-    if (day === todayIndex() && start <= nowMin()) { err.textContent = 'Pick a time later today, or another day.'; return; }
-    if (entry.plan.some((x) => x !== s && x.day === day)) { err.textContent = 'There’s already a session that day.'; return; }
-    const w = winFor(key, day);
-    const fits = freeGaps(blocksFor(key), day, w).some(([a, z]) => start >= a && start + len <= z);
-    if (!fits) { err.textContent = `That clashes with a commitment or falls outside your training hours (${fmtTime(toMin(w.start))} to ${fmtTime(toMin(w.end))}).`; return; }
-    Object.assign(s, { day, start, end: start + len, pinned: true });
-    s.notes = rebuildNotes(s, blocksFor(key));
-    entry.plan.sort((a, z) => a.day - z.day);
+    const problem = canMoveTo(key, entry.plan, s, day, start);
+    if (problem) { err.textContent = problem; return; }
+    moveThisWeek(s, day, start);
     openMove = null;
     commit(); refresh();
     toast(`${s.name} moved to ${DAYS[day]}, ${fmtTime(start)}`);
@@ -8896,8 +8991,20 @@ function nextWeekDraft(key) {
   const e = (state.history || {})[nk] || {};
   if (e.plan && e.plan.length) return { plan: e.plan, warnings: e.warnings || [] };
   const skip = [...new Set([...(e.skipDays || []), ...(state.restDays || [])])];
-  const res = planWithFlex(state.profile, weekBlocks(state, nk), state.window, { busy: e.busy, skipDays: skip, keys: keysFor(nk, e.busy), keepOrder: keepOrder(), dayWindows: dayWindows(state, nk) });
+  const res = planWithPins(nk, { busy: e.busy, skipDays: skip, keys: keysFor(nk, e.busy), keepOrder: keepOrder(), dayWindows: dayWindows(state, nk) });
   return { plan: res.sessions, warnings: res.warnings || [] };
+}
+
+// Plan a week, keeping sessions the athlete moved (history[week].pins) at their chosen times.
+function planWithPins(key, opts) {
+  const blocks = weekBlocks(state, key);
+  const base = planWithFlex(state.profile, blocks, state.window, opts);
+  const pins = ((state.history || {})[key] || {}).pins;
+  if (!pins || !Object.keys(pins).length) return base;
+  const { pinned, pinnedKeys } = pinnedPlan(base.sessions, pins);
+  if (!pinned.length) return base;
+  const rest = planWithFlex(state.profile, blocks, state.window, { ...opts, keys: (opts.keys || []).filter((k) => !pinnedKeys.has(k)), fixed: [...(opts.fixed || []), ...pinned] });
+  return { ...rest, sessions: [...pinned, ...rest.sessions].sort((a, b) => a.day - b.day) };
 }
 
 function nextWeekLines(key) {

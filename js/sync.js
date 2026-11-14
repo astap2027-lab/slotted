@@ -46,6 +46,8 @@ export function mergeStates(local, server) {
     if (!n.plan && o.plan) n.plan = clone(o.plan);
     // Commitments read from a connected calendar: the newer copy wins; keep the other's if the newer has none.
     if (!n.cal && o.cal) n.cal = clone(o.cal);
+    // Next-week sessions the athlete moved: keep the other copy's if the newer has none.
+    if (!n.pins && o.pins) n.pins = clone(o.pins);
   }
 
   out.log = clone(newer.log || {});
