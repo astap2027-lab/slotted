@@ -9,7 +9,7 @@ import { askCoach, formatReply, STARTERS, commitmentLines, planLines, windowLine
 import {
   weekBlocks, windowFor, dayWindows, parseAvailability, validateChange, applyChanges, describeChange, touchesFixed,
   timetableContext, askTimetable, askTimetablePhotos, BLOCK_TYPES, planWithFlex, appliesTo, SPORT_EFFORTS, sportEffort, photoPlan, PHOTO_MAX_IMAGES,
-  calendarBlocks, calendarDiff, CAL_TYPES, ruleKey, guessType, guessEffort,
+  calendarBlocks, calendarDiff, CAL_TYPES, ruleKey, guessType, guessEffort, looksLikeSchool,
 } from './timetable.js';
 import { eventsBetween, parseICS, calendarUrl, sessionEvents, buildICS } from './ical.js';
 import { proposeChanges, proposeMornings, applyProposal } from './adjust.js';
@@ -104,7 +104,7 @@ const MUSCLE_LABEL = Object.fromEntries(MUSCLES.map((m) => [m.id, m.label]));
 const fmtNum = (n) => Math.round(n).toLocaleString('en-AU');
 const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 // The release number. It must match CACHE in sw.js (a test checks); shown at the bottom of Settings.
-const APP_VERSION = 34;
+const APP_VERSION = 35;
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const subnav = (cur) => `<nav class="subnav" aria-label="Training">${[['plan', 'This week'], ['week', 'My week'], ['routine', 'Routine'], ['library', 'Library']]
   .map(([v, t]) => `<a href="#${v}" ${v === cur ? 'aria-current="page"' : ''}>${t}</a>`).join('')}</nav>`;
@@ -1332,6 +1332,7 @@ function calendarWeeks(texts) {
       continue;
     }
     const evs = eventsBetween(text, from, to);
+    c.looksSchool = looksLikeSchool(evs);
     let n = 0;
     for (const wk of weeks) { const list = calendarBlocks(evs, c, state.calendarRules || {}, wk); n += list.length; out[wk].push(...list); }
     c.lastCount = n;
@@ -1499,10 +1500,10 @@ function calendarsPanel() {
   const cals = calList();
   return `<section class="card stack" id="calendars-card">
     <h2>Calendars</h2>
-    <p class="muted small">Connect Google Calendar, Apple Calendar or your school app. Slotted reads it whenever you open the app, plans your gym sessions around what’s on, and tells you what changed.</p>
+    <p class="muted small">Connect Google Calendar, Apple Calendar or your school app. ${CAL_HOW}</p>
     ${cals.length ? `<ul class="cal-list">${cals.map((c) => `<li>
       <div><b>${esc(c.name)}</b>
-        <small class="muted">${esc(CAL_TYPES[c.type] || CAL_TYPES.auto)}${c.allDayBlocks ? '. All-day events block the day' : ''}</small>
+        <small class="muted">${esc(CAL_TYPES[c.type] || CAL_TYPES.auto)}${(!c.type || c.type === 'auto') && c.looksSchool ? ' (reads as a school timetable)' : ''}${c.allDayBlocks ? '. All-day events block the day' : ''}</small>
         <small class="${c.error ? 'note-warn' : 'muted'}">${c.error ? esc(CAL_ERRORS[c.error] || CAL_ERRORS.unreachable) : c.lastSync ? `Read ${calAgo(c.lastSync)}${c.lastCount !== undefined ? `. ${plural(c.lastCount, 'commitment')} this week and next` : ''}` : 'Not read yet'}</small></div>
       <button type="button" class="ghost danger" data-calrm="${esc(c.id)}" aria-label="Remove ${esc(c.name)}">Remove</button>
     </li>`).join('')}</ul>
@@ -1566,36 +1567,51 @@ function wireCalendars() {
   if (check) check.addEventListener('click', () => syncCalendars({ force: true, after: () => { if (viewName() === 'profile') renderSettings(); } }));
 }
 
-// My week: what came from calendars this week and next, with a way to say how Slotted should treat each event.
+// How syncing works, in the words shown on My week and in Settings.
+const CAL_HOW = 'Slotted reads your calendars when you open it, again when you come back after 15 minutes or more, and when you tap Check now. It plans this week and next around them and shows what changed, with an Undo. It never changes your calendars.';
+
+// My week: what came from calendars, grouped by day. A school day is one row; other events can be adjusted.
 function calendarCard() {
   if (!calList().length) return '';
   const key = currentWeek();
-  const rows = [];
-  for (const wk of [key, addWeeks(key, 1)]) for (const b of ((state.history[wk] || {}).cal || [])) rows.push({ wk, b });
   const when = (b) => (b.start === '00:00' && b.end === '23:59' ? 'all day' : `${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}`);
+  const row = (b) => {
+    const rule = (state.calendarRules || {})[ruleKey(b.label)] || {};
+    const open = editingCal === b.id;
+    const kind = b.merged ? `${plural(b.classes, 'class', 'classes')} from ${b.calName || 'your school calendar'}`
+      : `${BLOCK_TYPES[b.type] === 'Something else' ? 'Other' : (BLOCK_TYPES[b.type] || 'Other')}${b.type === 'sport' ? `, ${SPORT_EFFORTS[sportEffort(b.intensity)].label.toLowerCase()}` : ''}${b.flex ? ', flexible' : ''}`;
+    return `<li class="cal-item${b.merged ? ' is-school' : ''}">
+      ${b.merged ? `<div class="cal-row"><span><b>${esc(b.label)}</b> ${when(b)}</span><small class="muted">${esc(kind)}</small></div>`
+        : `<button type="button" class="cal-row" data-caledit="${esc(b.id)}" aria-expanded="${open}"><span><b>${esc(b.label)}</b> ${when(b)}</span><small class="muted">${esc(kind)}</small></button>`}
+      ${open ? `<form class="cal-rule stack" data-calrule="${esc(b.label)}">
+        <p class="small muted">For every event called “${esc(b.label)}”:</p>
+        <div class="row">
+          <div class="field"><label for="cr-type">Type</label><select id="cr-type" name="type">${Object.entries(BLOCK_TYPES).map(([v, t]) => `<option value="${v}" ${(rule.type || b.type) === v ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
+          <div class="field"><label for="cr-int">If it’s sport</label><select id="cr-int" name="intensity">${Object.entries(SPORT_EFFORTS).map(([v, t]) => `<option value="${v}" ${(rule.intensity || b.intensity || 'light') === v ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></div>
+        </div>
+        <label class="chip"><input type="checkbox" name="flex" value="1" ${rule.flex || b.flex ? 'checked' : ''}><span>Flexible (can move if the week is too full)</span></label>
+        <label class="chip"><input type="checkbox" name="ignore" value="1"><span>Ignore events called “${esc(b.label)}”</span></label>
+        <div class="actions"><button type="submit" class="primary">Save</button><button type="button" class="ghost" data-calclose>Cancel</button></div>
+      </form>` : ''}
+    </li>`;
+  };
+  const week = (wk) => {
+    const blocks = ((state.history[wk] || {}).cal) || [];
+    if (!blocks.length) return '<p class="small muted">Nothing from your calendars.</p>';
+    return DAYS.map((name, d) => {
+      const list = blocks.filter((b) => b.day === d).sort((x, y) => toMin(x.start) - toMin(y.start));
+      return list.length ? `<div class="cal-day"><span class="label">${name}</span><ul class="cal-rows">${list.map(row).join('')}</ul></div>` : '';
+    }).join('');
+  };
+  const nextOpen = ((state.history[addWeeks(key, 1)] || {}).cal || []).some((b) => b.id === editingCal);
+  const ignored = Object.entries(state.calendarRules || {}).filter(([, r]) => r.ignore);
   return `<section class="card stack" aria-labelledby="calc-h">
     <div class="card-head"><h2 id="calc-h">From your calendars</h2><a href="#profile">Calendars</a></div>
-    ${rows.length ? `<ul class="cal-rows">${rows.map(({ wk, b }) => {
-      const rule = (state.calendarRules || {})[ruleKey(b.label)] || {};
-      const open = editingCal === b.id;
-      return `<li>
-        <button type="button" class="cal-row" data-caledit="${esc(b.id)}" aria-expanded="${open}" ${b.merged ? 'disabled' : ''}>
-          <span><b>${esc(b.label)}</b> ${wk === key ? '' : 'next '}${DAYS[b.day]}, ${when(b)}</span>
-          <small class="muted">${esc(BLOCK_TYPES[b.type] || 'Other')}${b.type === 'sport' ? `, ${esc(SPORT_EFFORTS[sportEffort(b.intensity)].label.toLowerCase())}` : ''}${b.flex ? ', flexible' : ''}${b.merged ? `, ${plural(b.classes, 'class', 'classes')} from ${esc(b.calName || 'your school calendar')}` : ''}</small>
-        </button>
-        ${open ? `<form class="cal-rule stack" data-calrule="${esc(b.label)}">
-          <p class="small muted">For every event called “${esc(b.label)}”:</p>
-          <div class="row">
-            <div class="field"><label for="cr-type">Type</label><select id="cr-type" name="type">${Object.entries(BLOCK_TYPES).map(([v, t]) => `<option value="${v}" ${(rule.type || b.type) === v ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
-            <div class="field"><label for="cr-int">If it’s sport</label><select id="cr-int" name="intensity">${Object.entries(SPORT_EFFORTS).map(([v, t]) => `<option value="${v}" ${(rule.intensity || b.intensity || 'light') === v ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></div>
-          </div>
-          <label class="chip"><input type="checkbox" name="flex" value="1" ${rule.flex || b.flex ? 'checked' : ''}><span>Flexible (can move if the week is too full)</span></label>
-          <label class="chip"><input type="checkbox" name="ignore" value="1"><span>Ignore events called “${esc(b.label)}”</span></label>
-          <div class="actions"><button type="submit" class="primary">Save</button><button type="button" class="ghost" data-calclose>Cancel</button></div>
-        </form>` : ''}
-      </li>`;
-    }).join('')}</ul>` : '<p class="small muted">Nothing from your calendars this week or next.</p>'}
-    ${(state.calendarRules && Object.values(state.calendarRules).some((r) => r.ignore)) ? `<p class="small muted">Ignoring: ${Object.entries(state.calendarRules).filter(([, r]) => r.ignore).map(([k]) => `<button type="button" class="linkish" data-calunignore="${esc(k)}">${esc(k)} ×</button>`).join(' ')}</p>` : ''}
+    <p class="small muted">${CAL_HOW} Your ${state.useAB ? 'Week A/B timetable' : 'timetable in My week'} stays as your usual week; on days your school calendar has classes, its times are used instead. Tap an event to say how Slotted should treat it.</p>
+    <h3 class="cal-week">This week</h3>
+    ${week(key)}
+    <details class="cal-next"${nextOpen ? ' open' : ''}><summary>Next week</summary>${week(addWeeks(key, 1))}</details>
+    ${ignored.length ? `<p class="small muted">Ignoring: ${ignored.map(([k]) => `<button type="button" class="linkish" data-calunignore="${esc(k)}" aria-label="Stop ignoring ${esc(k)}">${esc(k)} ×</button>`).join(' ')}</p>` : ''}
   </section>`;
 }
 
