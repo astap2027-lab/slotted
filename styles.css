@@ -952,7 +952,13 @@ td .effort-opts { max-width: 300px; }
 .cal-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-radius: var(--r-md); background: var(--surface-2); }
 .cal-list li > div { display: grid; gap: 2px; min-width: 0; }
 .cal-list small { display: block; }
-.cal-row { width: 100%; display: grid; gap: 2px; text-align: left; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-2); border: 1px solid transparent; }
+.cal-row { width: 100%; display: grid; gap: 2px; justify-content: stretch; justify-items: start; align-items: start; text-align: left; white-space: normal; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-2); border: 1px solid transparent; min-height: 0; font-weight: 500; font-size: 15px; line-height: 1.35; }
+.cal-row > span { overflow-wrap: anywhere; }
+.cal-item.is-school .cal-row { border-left: 3px solid var(--line); }
+.cal-day { display: grid; gap: 6px; }
+.cal-week { margin: 4px 0 0; font-size: 15px; }
+.cal-next summary { cursor: pointer; font-weight: 600; padding: 6px 0; }
+.cal-next[open] { display: grid; gap: 10px; }
 .cal-row:not(:disabled):hover { border-color: var(--line); }
 .cal-row:disabled { opacity: 1; cursor: default; }
 .cal-rule { padding: 12px; margin-top: 6px; border-radius: var(--r-md); border: 1px solid var(--line); }

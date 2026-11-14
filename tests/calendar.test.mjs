@@ -126,3 +126,41 @@ test('the fetch function returns calendars and refuses everything else', async (
   globalThis.fetch = async () => { const e = new Error('slow'); e.name = 'TimeoutError'; throw e; };
   assert.equal((await onRequestPost({ request: req({ url: 'https://example.com/cal.ics' }), env: {} })).status, 502);
 });
+
+// ---------- a real school feed: class codes and teachers, study periods, cancelled classes ----------
+import { looksLikeSchool, classLike } from '../js/timetable.js';
+const day = (d) => `202611${String(16 + d).padStart(2, '0')}`;
+const P = [['0845', '0940'], ['0940', '0955'], ['0955', '1050'], ['1120', '1215'], ['1215', '1305'], ['1335', '1425'], ['1425', '1515']];
+const axelWeek = cal(
+  ev('m1', `${day(0)}T`.slice(0, 8) + 'T084500', `${day(0)}T094000`, '11Study.b!MonB1'),
+  ev('m2', `${day(0)}T094000`, `${day(0)}T095500`, 'TE05. Charlesworth, Harry'),
+  ev('m3', `${day(0)}T095500`, `${day(0)}T105000`, '12ENA.04 Charlesworth, Harry'),
+  ev('m4', `${day(0)}T112000`, `${day(0)}T121500`, '11Study.c!MonB3 TBA'),
+  ev('m5', `${day(0)}T121500`, `${day(0)}T130500`, '12HMS.04 Darvill, Patrick'),
+  ev('m6', `${day(0)}T133500`, `${day(0)}T142500`, '12MAG.06 Soden, Mr C'),
+  ev('m7', `${day(0)}T142500`, `${day(0)}T151500`, '12SR2.01 Lawson, Angus'),
+  ev('og', `${day(0)}T153000`, `${day(0)}T163000`, 'O Group'),
+  ...[1, 2, 3, 4].flatMap((d) => P.map(([s, e], i) => ev(`c${d}${i}`, `${day(d)}T${s}00`, `${day(d)}T${e}00`, i === 1 && d === 3 ? 'TE05. Cancelled Charlesworth, Harry' : `12LG2.0${i} Tatton, Jonathan`))),
+  ev('cad', `${day(4)}T151500`, `${day(4)}T180000`, 'Cadets'),
+  ev('sw', `${day(2)}T130500`, `${day(2)}T133500`, 'SOTWEG in W33'),
+);
+
+test('a real school feed reads as one School block a day; study, cancelled and after-school events handled', () => {
+  const evs = events(axelWeek);
+  assert.equal(looksLikeSchool(evs), true, '"Work it out" spots a school timetable');
+  assert.equal(looksLikeSchool(events(personal)), false, 'a personal calendar is not a school timetable');
+  assert.equal(classLike(evs.find((e) => e.title === 'Cadets')), false);
+  const blocks = calendarBlocks(evs, { id: 's', name: 'Compass', type: 'auto' }, {}, KEY);
+  const rows = blocks.map((b) => `${b.day} ${b.start}-${b.end} ${b.type} ${b.label}${b.merged ? ` (${b.classes})` : ''}`);
+  assert.deepEqual(rows, [
+    '0 09:40-15:15 school School (5)', // Monday starts at roll call: period 1 is a study period
+    '0 15:30-16:30 other O Group',
+    '1 08:45-15:15 school School (7)',
+    '2 08:45-15:15 school School (8)', // SOTWEG at lunch is class-like, inside the day
+    '3 08:45-15:15 school School (6)', // the cancelled roll call is skipped
+    '4 08:45-15:15 school School (7)',
+    '4 15:15-18:00 other Cadets',
+  ]);
+  // The same calendar marked "School timetable" gives the same result.
+  assert.deepEqual(calendarBlocks(evs, { id: 's', name: 'Compass', type: 'school' }, {}, KEY).map((b) => b.label), blocks.map((b) => b.label));
+});

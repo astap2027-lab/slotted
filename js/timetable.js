@@ -57,6 +57,20 @@ export function guessType(title) {
   return 'other';
 }
 export const guessEffort = (title) => { const t = String(title || '').toLowerCase(); return CAL_HARD.test(t) ? 'hard' : CAL_EASY.test(t) ? 'easy' : 'light'; };
+// School timetables in calendars: lots of short weekday-daytime events with class codes and teachers' names.
+const CAL_FREE = /(^|[^a-z])(study|spare|free period|free)(?=[^a-z]|$)/i;
+const CAL_CANCELLED = /\bcancell?ed\b/i;
+const weekdayOfDate = (date) => { const [y, m, d] = date.split('-').map(Number); return (new Date(Date.UTC(y, m - 1, d)).getUTCDay() + 6) % 7; };
+const lengthMin = (e) => toMin(e.endTime) - toMin(e.startTime);
+// A weekday event between 7am and 3:30pm lasting up to two hours: what a class looks like.
+export const classLike = (e) => !!e && !e.allDay && !!e.startTime && !!e.endTime && weekdayOfDate(e.date) < 5
+  && e.startTime >= '07:00' && e.startTime < '15:30' && lengthMin(e) > 0 && lengthMin(e) <= 120;
+// A calendar that reads as a school timetable: at least 10 class-like events, and most timed events are class-like.
+export function looksLikeSchool(events) {
+  const timed = (events || []).filter((e) => !e.allDay && !e.free);
+  const classes = timed.filter(classLike);
+  return classes.length >= 10 && classes.length / timed.length >= 0.6;
+}
 const dateNum = (s) => { const [y, m, d] = s.split('-').map(Number); return Math.round(Date.UTC(y, m - 1, d) / 86400000); };
 
 /**
@@ -70,8 +84,11 @@ export function calendarBlocks(events, cal, rules = {}, key) {
   const dayOf = (date) => { const d = dateNum(date) - monday; return d >= 0 && d <= 6 ? d : null; };
   const out = [];
   const school = new Map(); // day -> merged classes (School calendars)
+  // "Work it out" treats a calendar that reads as a school timetable as one.
+  const asSchool = cal.type === 'school' || ((!cal.type || cal.type === 'auto') && looksLikeSchool(events));
   for (const e of events || []) {
     if (e.free || (e.uid && /@slotted$/i.test(e.uid))) continue; // "free" events, and Slotted's own feed
+    if (CAL_CANCELLED.test(e.title || '')) continue; // some schools mark cancelled classes in the name
     const rule = rules[ruleKey(e.title)] || {};
     if (rule.ignore) continue;
     const label = String(e.title || cal.name || 'Calendar').slice(0, 60);
@@ -85,13 +102,14 @@ export function calendarBlocks(events, cal, rules = {}, key) {
     }
     const day = dayOf(e.date);
     if (day === null || !e.startTime || !e.endTime || e.endTime <= e.startTime) continue;
-    if (cal.type === 'school' && !rule.type) {
-      if (PH_FREE.test(label)) continue; // study and free periods
+    // Classes merge into one School block a day; study and free periods don't count. After-school things stay separate.
+    if (asSchool && !rule.type && classLike(e)) {
+      if (CAL_FREE.test(label)) continue;
       const m = school.get(day);
       school.set(day, m ? { start: e.startTime < m.start ? e.startTime : m.start, end: e.endTime > m.end ? e.endTime : m.end, n: m.n + 1 } : { start: e.startTime, end: e.endTime, n: 1 });
       continue;
     }
-    const type = rule.type || (cal.type && cal.type !== 'auto' ? cal.type : guessType(label));
+    const type = rule.type || (cal.type && !['auto', 'school'].includes(cal.type) ? cal.type : guessType(label));
     out.push({
       id: `cal:${cal.id}:${e.uid || label}:${e.date}:${e.startTime}`, day, start: e.startTime, end: e.endTime, type, label, calId: cal.id, calName: cal.name,
       ...(type === 'sport' ? { intensity: sportEffort(rule.intensity || guessEffort(label)) } : {}),
