@@ -35,6 +35,7 @@ import {
 
 let state = load();
 let editingWeek = 'A';
+let myWeekNext = false; // without Week A/B: whether My week shows next week's calendar events
 const app = document.getElementById('app');
 
 // ---------- helpers ----------
@@ -104,7 +105,7 @@ const MUSCLE_LABEL = Object.fromEntries(MUSCLES.map((m) => [m.id, m.label]));
 const fmtNum = (n) => Math.round(n).toLocaleString('en-AU');
 const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 // The release number. It must match CACHE in sw.js (a test checks); shown at the bottom of Settings.
-const APP_VERSION = 36;
+const APP_VERSION = 37;
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const subnav = (cur) => `<nav class="subnav" aria-label="Training">${[['plan', 'This week'], ['week', 'My week'], ['routine', 'Routine'], ['library', 'Library']]
   .map(([v, t]) => `<a href="#${v}" ${v === cur ? 'aria-current="page"' : ''}>${t}</a>`).join('')}</nav>`;
@@ -519,6 +520,10 @@ function renderWeek() {
   // With calendars connected, each real week is filled from them; the list here is only the usual, typed-in week.
   const fromCal = calList().length > 0;
   const calSchool = fromCal && [currentWeek(), addWeeks(currentWeek(), 1)].some((wk) => ((state.history[wk] || {}).cal || []).some((b) => b.merged));
+  // The real week this tab stands for: this week if it's this tab's week type, otherwise next week.
+  const viewKey = state.useAB ? (editingWeek === typeOf(currentWeek()) ? currentWeek() : addWeeks(currentWeek(), 1)) : (myWeekNext ? addWeeks(currentWeek(), 1) : currentWeek());
+  const viewEnd = keyToDate(viewKey); viewEnd.setDate(viewEnd.getDate() + 6);
+  const calByDay = DAYS.map((_, d) => (fromCal ? (((state.history[viewKey] || {}).cal) || []) : []).filter((b) => b.day === d).sort((a, b) => toMin(a.start) - toMin(b.start)));
   const rest = state.restDays || [];
   const split = splitSummary();
 
@@ -536,20 +541,19 @@ function renderWeek() {
   <div class="grid2">
     <div class="stack">
       <section class="card">
-        <div class="card-head"><h2>Commitments${state.useAB ? `, Week ${editingWeek}` : ''}</h2></div>
-        ${fromCal ? `<p class="small muted">${blocks.length ? 'Your usual week. Your calendar adds to it each week (see From your calendars).' : 'Nothing typed in here. Each week is filled in from your calendar; see From your calendars. Add anything that isn’t in your calendar.'}</p>` : ''}
+        <div class="card-head"><h2>Commitments${state.useAB ? `, Week ${editingWeek}` : ''}</h2>${fromCal ? `<span class="label">${fmtDate(keyToDate(viewKey))} to ${fmtDate(viewEnd)}</span>` : ''}</div>
+        ${fromCal ? `<p class="small muted">Items marked <span class="tag cal-tag">Calendar</span> come from your calendar for that week; tap one to say how Slotted should treat it, and change it in your calendar app. Anything you add here repeats every ${state.useAB ? `Week ${editingWeek}` : 'week'}.</p>
+        ${state.useAB ? '' : `<div class="seg seg-small" role="group" aria-label="Which week's calendar">${[[false, 'This week'], [true, 'Next week']].map(([v, t]) => `<button type="button" data-myweek="${v ? 1 : 0}" aria-pressed="${myWeekNext === v}">${t}</button>`).join('')}</div>`}` : ''}
         <div class="daylist">
           ${DAYS.map((name, d) => `
           <div class="dayrow">
             <b>${name}${rest.includes(d) ? '<small class="restday">Rest day</small>' : ''}</b>
             <div class="items">
-              ${byDay[d].length ? byDay[d].map((b) => `
-                <span class="item ${b.type}${b.flex ? ' flex' : ''}">
-                  <button type="button" class="item-edit" data-edit="${b.id}" aria-expanded="${editingBlock === b.id}" aria-label="Edit ${esc(b.label)} on ${name}"><span>${esc(b.label)}, ${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}${b.type === 'sport' && b.intensity === 'hard' && !/game|race|match/i.test(b.label) ? ' <b class="tag">Game</b>' : ''}${b.type === 'sport' && b.intensity === 'easy' ? ' <b class="tag">Easy</b>' : ''}${blockTags(b)}</span></button>
-                  <button type="button" data-del="${b.id}" aria-label="Remove ${esc(b.label)} on ${name}">×</button>
-                </span>`).join('') : `<span class="empty">${fromCal ? 'Nothing typed in' : 'Free'}</span>`}
+              ${[...byDay[d].map((b) => ({ own: true, b })), ...calByDay[d].map((b) => ({ own: false, b }))].sort((x, y) => toMin(x.b.start) - toMin(y.b.start)).map(({ own, b }) => (own ? ownItem(b, name) : calItem(b, name))).join('')}
+              ${byDay[d].length || calByDay[d].length ? '' : '<span class="empty">Free</span>'}
             </div>
             ${byDay[d].some((b) => b.id === editingBlock) ? blockEditor(byDay[d].find((b) => b.id === editingBlock)) : ''}
+            ${calByDay[d].some((b) => b.id === editingCal) ? calRuleForm(calByDay[d].find((b) => b.id === editingCal)) : ''}
           </div>`).join('')}
         </div>
       </section>
@@ -630,7 +634,8 @@ function renderWeek() {
     </div>
   </div>`;
 
-  app.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => { editingWeek = b.dataset.tab; editingBlock = null; renderWeek(); }));
+  app.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => { editingWeek = b.dataset.tab; editingBlock = null; editingCal = null; renderWeek(); }));
+  app.querySelectorAll('[data-myweek]').forEach((b) => b.addEventListener('click', () => { myWeekNext = b.dataset.myweek === '1'; editingCal = null; renderWeek(); }));
   wireAvail(renderWeek);
   wireWeekExtras();
   wireCalendarCard();
@@ -1574,52 +1579,52 @@ function wireCalendars() {
 // How syncing works, in the words shown on My week and in Settings.
 const CAL_HOW = 'Slotted reads your calendars when you open it, again when you come back after 15 minutes or more, and when you tap Check now. It plans this week and next around them and shows what changed, with an Undo. It never changes your calendars.';
 
-// My week: what came from calendars, grouped by day. A school day is one row; other events can be adjusted.
+// A typed-in commitment in a My week day row.
+function ownItem(b, name) {
+  return `                <span class="item ${b.type}${b.flex ? ' flex' : ''}">
+                  <button type="button" class="item-edit" data-edit="${b.id}" aria-expanded="${editingBlock === b.id}" aria-label="Edit ${esc(b.label)} on ${name}"><span>${esc(b.label)}, ${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}${b.type === 'sport' && b.intensity === 'hard' && !/game|race|match/i.test(b.label) ? ' <b class="tag">Game</b>' : ''}${b.type === 'sport' && b.intensity === 'easy' ? ' <b class="tag">Easy</b>' : ''}${blockTags(b)}</span></button>
+                  <button type="button" data-del="${b.id}" aria-label="Remove ${esc(b.label)} on ${name}">×</button>
+                </span>`;
+}
+
+// A calendar event inside a My week day row. A merged school day just shows; other events open their options.
+function calItem(b, dayName) {
+  const when = b.start === '00:00' && b.end === '23:59' ? 'all day' : `${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}`;
+  const tags = `${b.type === 'sport' && b.intensity === 'hard' ? ' <b class="tag">Game</b>' : ''}${b.type === 'sport' && b.intensity === 'easy' ? ' <b class="tag">Easy</b>' : ''}${b.flex ? ' <b class="tag">Flexible</b>' : ''}`;
+  if (b.merged) return `<span class="item school cal-item-row"><span class="item-edit"><span>${esc(b.label)}, ${when} <b class="tag cal-tag">Calendar</b> <small class="muted">${plural(b.classes, 'class', 'classes')}</small></span></span></span>`;
+  return `<span class="item ${b.type} cal-item-row${b.flex ? ' flex' : ''}"><button type="button" class="item-edit" data-caledit="${esc(b.id)}" aria-expanded="${editingCal === b.id}" aria-label="Options for ${esc(b.label)} on ${dayName}"><span>${esc(b.label)}, ${when} <b class="tag cal-tag">Calendar</b>${tags}</span></button></span>`;
+}
+
+// How Slotted should treat every event with this name (type, effort, flexible, ignore).
+function calRuleForm(b) {
+  const rule = (state.calendarRules || {})[ruleKey(b.label)] || {};
+  return `<form class="cal-rule stack" data-calrule="${esc(b.label)}">
+    <p class="small muted">From ${esc(b.calName || 'your calendar')}. Change the time in your calendar app. For every event called “${esc(b.label)}”:</p>
+    <div class="row">
+      <div class="field"><label for="cr-type">Type</label><select id="cr-type" name="type">${Object.entries(BLOCK_TYPES).map(([v, t]) => `<option value="${v}" ${(rule.type || b.type) === v ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
+      <div class="field"><label for="cr-int">If it’s sport</label><select id="cr-int" name="intensity">${Object.entries(SPORT_EFFORTS).map(([v, t]) => `<option value="${v}" ${(rule.intensity || b.intensity || 'light') === v ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></div>
+    </div>
+    <label class="chip"><input type="checkbox" name="flex" value="1" ${rule.flex || b.flex ? 'checked' : ''}><span>Flexible (can move if the week is too full)</span></label>
+    <label class="chip"><input type="checkbox" name="ignore" value="1"><span>Ignore events called “${esc(b.label)}”</span></label>
+    <div class="actions"><button type="submit" class="primary">Save</button><button type="button" class="ghost" data-calclose>Cancel</button></div>
+  </form>`;
+}
+
+// My week side card: how calendar syncing works, a Check now button, and what's being ignored.
 function calendarCard() {
   if (!calList().length) return '';
-  const key = currentWeek();
-  const when = (b) => (b.start === '00:00' && b.end === '23:59' ? 'all day' : `${fmtTime(toMin(b.start))} to ${fmtTime(toMin(b.end))}`);
-  const row = (b) => {
-    const rule = (state.calendarRules || {})[ruleKey(b.label)] || {};
-    const open = editingCal === b.id;
-    const kind = b.merged ? `${plural(b.classes, 'class', 'classes')} from ${b.calName || 'your school calendar'}`
-      : `${BLOCK_TYPES[b.type] === 'Something else' ? 'Other' : (BLOCK_TYPES[b.type] || 'Other')}${b.type === 'sport' ? `, ${SPORT_EFFORTS[sportEffort(b.intensity)].label.toLowerCase()}` : ''}${b.flex ? ', flexible' : ''}`;
-    return `<li class="cal-item${b.merged ? ' is-school' : ''}">
-      ${b.merged ? `<div class="cal-row"><span><b>${esc(b.label)}</b> ${when(b)}</span><small class="muted">${esc(kind)}</small></div>`
-        : `<button type="button" class="cal-row" data-caledit="${esc(b.id)}" aria-expanded="${open}"><span><b>${esc(b.label)}</b> ${when(b)}</span><small class="muted">${esc(kind)}</small></button>`}
-      ${open ? `<form class="cal-rule stack" data-calrule="${esc(b.label)}">
-        <p class="small muted">For every event called “${esc(b.label)}”:</p>
-        <div class="row">
-          <div class="field"><label for="cr-type">Type</label><select id="cr-type" name="type">${Object.entries(BLOCK_TYPES).map(([v, t]) => `<option value="${v}" ${(rule.type || b.type) === v ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
-          <div class="field"><label for="cr-int">If it’s sport</label><select id="cr-int" name="intensity">${Object.entries(SPORT_EFFORTS).map(([v, t]) => `<option value="${v}" ${(rule.intensity || b.intensity || 'light') === v ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></div>
-        </div>
-        <label class="chip"><input type="checkbox" name="flex" value="1" ${rule.flex || b.flex ? 'checked' : ''}><span>Flexible (can move if the week is too full)</span></label>
-        <label class="chip"><input type="checkbox" name="ignore" value="1"><span>Ignore events called “${esc(b.label)}”</span></label>
-        <div class="actions"><button type="submit" class="primary">Save</button><button type="button" class="ghost" data-calclose>Cancel</button></div>
-      </form>` : ''}
-    </li>`;
-  };
-  const week = (wk) => {
-    const blocks = ((state.history[wk] || {}).cal) || [];
-    if (!blocks.length) return '<p class="small muted">Nothing from your calendars.</p>';
-    return DAYS.map((name, d) => {
-      const list = blocks.filter((b) => b.day === d).sort((x, y) => toMin(x.start) - toMin(y.start));
-      return list.length ? `<div class="cal-day"><span class="label">${name}</span><ul class="cal-rows">${list.map(row).join('')}</ul></div>` : '';
-    }).join('');
-  };
-  const nextOpen = ((state.history[addWeeks(key, 1)] || {}).cal || []).some((b) => b.id === editingCal);
   const ignored = Object.entries(state.calendarRules || {}).filter(([, r]) => r.ignore);
+  const last = Math.max(0, ...calList().map((c) => c.lastSync || 0));
   return `<section class="card stack" aria-labelledby="calc-h">
-    <div class="card-head"><h2 id="calc-h">From your calendars</h2><a href="#profile">Calendars</a></div>
-    <p class="small muted">${CAL_HOW} Your ${state.useAB ? 'Week A/B timetable' : 'timetable in My week'} stays as your usual week; on days your school calendar has classes, its times are used instead. Tap an event to say how Slotted should treat it.</p>
-    <h3 class="cal-week">This week</h3>
-    ${week(key)}
-    <details class="cal-next"${nextOpen ? ' open' : ''}><summary>Next week</summary>${week(addWeeks(key, 1))}</details>
+    <div class="card-head"><h2 id="calc-h">Calendar sync</h2><a href="#profile">Calendars</a></div>
+    <p class="small muted">${CAL_HOW}</p>
+    <div class="actions"><button type="button" data-calcheck ${calBusy ? 'disabled' : ''}>${calBusy ? 'Checking…' : 'Check now'}</button>${last ? `<span class="small muted">Last read ${calAgo(last)}</span>` : ''}</div>
     ${ignored.length ? `<p class="small muted">Ignoring: ${ignored.map(([k]) => `<button type="button" class="linkish" data-calunignore="${esc(k)}" aria-label="Stop ignoring ${esc(k)}">${esc(k)} ×</button>`).join(' ')}</p>` : ''}
   </section>`;
 }
 
 function wireCalendarCard() {
+  app.querySelectorAll('[data-calcheck]').forEach((b) => b.addEventListener('click', () => syncCalendars({ force: true, after: () => { if (viewName() === 'week') renderWeek(); } })));
   app.querySelectorAll('[data-caledit]').forEach((b) => b.addEventListener('click', () => { editingCal = editingCal === b.dataset.caledit ? null : b.dataset.caledit; renderWeek(); }));
   app.querySelectorAll('[data-calclose]').forEach((b) => b.addEventListener('click', () => { editingCal = null; renderWeek(); }));
   const reapply = () => {
