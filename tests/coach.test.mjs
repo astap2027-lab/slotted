@@ -147,3 +147,9 @@ test('the coach is told about waiting questions, cannot apply them, and may ask 
   assert.match(COACH_INSTRUCTIONS, /at most one short question/);
   assert.match(COACH_INSTRUCTIONS, /Never say you have moved or changed anything/);
 });
+
+test('the coach knows where sessions show and that next week is a draft until Monday', () => {
+  assert.match(COACH_INSTRUCTIONS, /draft/);
+  assert.match(COACH_INSTRUCTIONS, /becomes the real plan on Monday/);
+  assert.match(COACH_INSTRUCTIONS, /Never point them to a screen or button that isn't described here/);
+});
