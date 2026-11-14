@@ -1,6 +1,6 @@
 import {
   DAYS, DAYS_SHORT, planWeek, weekKey, weekType, keyToDate, fmtTime, toMin, toHHMM, streakInfo, SPLIT_NAMES, SPLITS, SESSIONS,
-  busyCount, sessionKeysFor, morningSlot, moveName, weeksBetween, addWeeks, sessionInfo, GROUPS, exercisesFor, freeGaps, bestSlot,
+  busyCount, sessionKeysFor, morningSlot, sessionRows, moveName, weeksBetween, addWeeks, sessionInfo, GROUPS, exercisesFor, freeGaps, bestSlot,
   exerciseLibrary, setCustomRoutine, rememberExerciseNames, customExerciseNames, routineKeys, exerciseKey,
 } from './scheduler.js';
 import { collectHistory, summarise } from './progress.js';
@@ -107,7 +107,7 @@ const MUSCLE_LABEL = Object.fromEntries(MUSCLES.map((m) => [m.id, m.label]));
 const fmtNum = (n) => Math.round(n).toLocaleString('en-AU');
 const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 // The release number. It must match CACHE in sw.js (a test checks); shown at the bottom of Settings.
-const APP_VERSION = 39;
+const APP_VERSION = 40;
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const subnav = (cur) => `<nav class="subnav" aria-label="Training">${[['plan', 'This week'], ['week', 'My week'], ['routine', 'Routine'], ['library', 'Library']]
   .map(([v, t]) => `<a href="#${v}" ${v === cur ? 'aria-current="page"' : ''}>${t}</a>`).join('')}</nav>`;
@@ -526,6 +526,11 @@ function renderWeek() {
   const viewKey = state.useAB ? (editingWeek === typeOf(currentWeek()) ? currentWeek() : addWeeks(currentWeek(), 1)) : (myWeekNext ? addWeeks(currentWeek(), 1) : currentWeek());
   const viewEnd = keyToDate(viewKey); viewEnd.setDate(viewEnd.getDate() + 6);
   const calByDay = DAYS.map((_, d) => (fromCal ? (((state.history[viewKey] || {}).cal) || []) : []).filter((b) => b.day === d).sort((a, b) => toMin(a.start) - toMin(b.start)));
+  // Gym sessions for that week: this week's plan, or next week's draft (worked out, not saved, until it starts).
+  const isDraft = viewKey !== currentWeek();
+  const thisEntry = isDraft ? null : ensurePlan(currentWeek());
+  const gymRows = isDraft ? sessionRows(nextWeekDraft(currentWeek()).plan, { draft: true }) : sessionRows(thisEntry.plan, { done: thisEntry.done || [] });
+  const gymByDay = DAYS.map((_, d) => gymRows.filter((r) => r.day === d));
   const rest = state.restDays || [];
   const split = splitSummary();
 
@@ -543,7 +548,8 @@ function renderWeek() {
   <div class="grid2">
     <div class="stack">
       <section class="card">
-        <div class="card-head"><h2>Commitments${state.useAB ? `, Week ${editingWeek}` : ''}</h2>${fromCal ? `<span class="label">${fmtDate(keyToDate(viewKey))} to ${fmtDate(viewEnd)}</span>` : ''}</div>
+        <div class="card-head"><h2>${state.useAB ? `Week ${editingWeek}` : 'Your week'}</h2><span class="label">${fmtDate(keyToDate(viewKey))} to ${fmtDate(viewEnd)}</span></div>
+        ${gymRows.length ? `<p class="small muted">${isDraft ? 'Gym sessions for next week are a draft until Monday. They follow any change to your calendar or commitments.' : 'Gym sessions are this week’s plan. Tap one to open it; move or lock it on This week.'}</p>` : ''}
         ${fromCal ? `<p class="small muted">Items marked <span class="tag cal-tag">Calendar</span> come from your calendar for that week; tap one to say how Slotted should treat it, and change it in your calendar app. Anything you add here repeats every ${state.useAB ? `Week ${editingWeek}` : 'week'}.</p>
         ${state.useAB ? '' : `<div class="seg seg-small" role="group" aria-label="Which week's calendar">${[[false, 'This week'], [true, 'Next week']].map(([v, t]) => `<button type="button" data-myweek="${v ? 1 : 0}" aria-pressed="${myWeekNext === v}">${t}</button>`).join('')}</div>`}` : ''}
         <div class="daylist">
@@ -551,8 +557,9 @@ function renderWeek() {
           <div class="dayrow">
             <b>${name}${rest.includes(d) ? '<small class="restday">Rest day</small>' : ''}</b>
             <div class="items">
-              ${[...byDay[d].map((b) => ({ own: true, b })), ...calByDay[d].map((b) => ({ own: false, b }))].sort((x, y) => toMin(x.b.start) - toMin(y.b.start)).map(({ own, b }) => (own ? ownItem(b, name) : calItem(b, name))).join('')}
-              ${byDay[d].length || calByDay[d].length ? '' : '<span class="empty">Free</span>'}
+              ${[...byDay[d].map((b) => ({ kind: 'own', b, at: toMin(b.start) })), ...calByDay[d].map((b) => ({ kind: 'cal', b, at: toMin(b.start) })), ...gymByDay[d].map((b) => ({ kind: 'gym', b, at: b.start }))]
+                .sort((x, y) => x.at - y.at).map(({ kind, b }) => (kind === 'own' ? ownItem(b, name) : kind === 'cal' ? calItem(b, name) : gymItem(b))).join('')}
+              ${byDay[d].length || calByDay[d].length || gymByDay[d].length ? '' : '<span class="empty">Free</span>'}
             </div>
             ${byDay[d].some((b) => b.id === editingBlock) ? blockEditor(byDay[d].find((b) => b.id === editingBlock)) : ''}
             ${calByDay[d].some((b) => b.id === editingCal) ? calRuleForm(calByDay[d].find((b) => b.id === editingCal)) : ''}
@@ -1658,6 +1665,24 @@ function wireCalendars() {
 // How syncing works, in the words shown on My week and in Settings.
 const CAL_HOW = 'Slotted reads your calendars when you open it, again when you come back after 15 minutes or more, and when you tap Check now. It plans this week and next around them and shows what changed, with an Undo. It never changes your calendars.';
 
+// This week page: next week's sessions as a draft (the real plan is made on Monday).
+function nextWeekCard() {
+  const rows = sessionRows(nextWeekDraft(currentWeek()).plan, { draft: true });
+  if (!rows.length) return '';
+  return `<section class="card stack next-draft" aria-labelledby="nwd-h" style="margin-top:16px">
+    <div class="card-head"><h2 id="nwd-h">Next week</h2><span class="label">Draft</span></div>
+    <ul class="propmoves">${rows.map((r) => `<li><b>${DAYS[r.day]} ${fmtTime(r.start)}</b>: ${esc(r.name)}</li>`).join('')}</ul>
+    <p class="small muted">Worked out around next week’s calendar and commitments. It becomes your plan on Monday and follows any change until then. <a href="#week">See it in My week</a>.</p>
+  </section>`;
+}
+
+// A gym session in a My week day row: this week's opens the workout; next week's is a draft.
+function gymItem(r) {
+  const label = `Gym: ${esc(r.name)}, ${fmtTime(r.start)} to ${fmtTime(r.end)}${r.done ? ' <b class="tag">Done</b>' : ''}${r.draft ? ' <b class="tag">Draft</b>' : ''}`;
+  return r.draft ? `<span class="item gym"><span class="item-edit"><span>${label}</span></span></span>`
+    : `<a class="item gym" href="${workoutHref(r, r.done)}"><span class="item-edit"><span>${label}</span></span></a>`;
+}
+
 // A typed-in commitment in a My week day row.
 function ownItem(b, name) {
   return `                <span class="item ${b.type}${b.flex ? ' flex' : ''}">
@@ -2309,7 +2334,7 @@ function renderPlan() {
     next = `<section class="hero rest-day next-card">
       <p class="hero-when">This week</p>
       <h2>${doneCount >= sessions.length ? 'Every session done' : 'Nothing left to train this week'}</h2>
-      <p class="muted">${doneCount >= sessions.length ? 'Nice work. Rest up. Next week’s plan appears on Monday.' : 'Next week’s plan appears on Monday.'}</p>
+      <p class="muted">${doneCount >= sessions.length ? 'Nice work. Rest up. Next week’s draft is below.' : 'Next week’s draft is below.'}</p>
     </section>`;
   }
 
@@ -2349,6 +2374,7 @@ function renderPlan() {
   ${rest.length ? `
   <div class="sec-head"><h2>${nextUp ? 'Rest of the week' : 'Sessions'}</h2></div>
   <div class="sessions-grid">${rest.map((s) => sessionCard(ctx, s, fr)).join('')}</div>` : ''}
+  ${nextWeekCard()}
   <div class="ask-row" style="margin-top:22px">${askBtn('Can you help me organise next week’s workouts around my commitments?', 'Ask the coach to help organise next week')}</div>`;
 
   document.getElementById('busy').addEventListener('click', () => {

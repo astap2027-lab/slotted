@@ -269,3 +269,11 @@ test('mix: a day with nothing on is not treated as a free morning', () => {
   const s = bestSlot([], 5, win, 60, 'mix');
   assert.ok(s.start >= toMin('15:00') && s.start < toMin('18:00'), `got ${hhmm(s.start)}`);
 });
+
+import { sessionRows } from '../js/scheduler.js';
+test('session rows for a week view are sorted and marked draft or done', () => {
+  const rows = sessionRows([{ key: 'b', name: 'Legs', day: 5, start: 960, end: 1020 }, { key: 'a', name: 'Push', day: 0, start: 420, end: 480 }], { done: ['a'] });
+  assert.deepEqual(rows.map((r) => `${r.day} ${r.name} ${r.done} ${r.draft}`), ['0 Push true false', '5 Legs false false']);
+  assert.ok(sessionRows([{ key: 'x', name: 'X', day: 1, start: 1, end: 2 }], { draft: true })[0].draft);
+  assert.deepEqual(sessionRows(undefined), []);
+});

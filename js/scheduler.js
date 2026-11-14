@@ -592,3 +592,9 @@ export function streakInfo(history, currentKey, target, sportCreditFor) {
   }
   return { current, longest: Math.max(longest, current), thisWeekMet: thisWeek };
 }
+
+// Planned sessions as rows for a week view: sorted by day and time, marked as a draft (next week) or done.
+export function sessionRows(plan, { draft = false, done = [] } = {}) {
+  return (plan || []).map((s) => ({ key: s.key, name: s.name, day: s.day, start: s.start, end: s.end, short: !!s.short, draft, done: done.includes(s.key) }))
+    .sort((a, b) => a.day - b.day || a.start - b.start);
+}

@@ -981,3 +981,7 @@ td .effort-opts { max-width: 300px; }
 .rimp-w ul { margin: 4px 0 0; padding-left: 1.2em; display: grid; gap: 3px; }
 .rimp-paste summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
 .rimp-paste textarea { margin-top: 8px; width: 100%; }
+
+/* ---------- gym sessions in My week ---------- */
+.item.gym { box-shadow: inset 3px 0 0 var(--lime); text-decoration: none; color: inherit; }
+a.item.gym:hover { border-color: var(--lime-line); }
