@@ -976,3 +976,8 @@ td .effort-opts { max-width: 300px; }
 .cal-item-row .item-edit:hover span, .cal-item-row .item-edit span { text-decoration: none; }
 .seg-small { margin: 6px 0 2px; }
 .seg-small button { min-height: 30px; font-size: 13.5px; }
+
+/* ---------- importing a routine ---------- */
+.rimp-w ul { margin: 4px 0 0; padding-left: 1.2em; display: grid; gap: 3px; }
+.rimp-paste summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+.rimp-paste textarea { margin-top: 8px; width: 100%; }

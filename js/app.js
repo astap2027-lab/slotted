@@ -12,6 +12,7 @@ import {
   calendarBlocks, calendarDiff, CAL_TYPES, ruleKey, guessType, guessEffort, looksLikeSchool,
 } from './timetable.js';
 import { eventsBetween, parseICS, calendarUrl, sessionEvents, buildICS, blockEvents } from './ical.js';
+import { routineFromCopy, askRoutineCopy, ROUTINE_MAX_IMAGES } from './routine-import.js';
 import { proposeChanges, proposeMornings, applyProposal } from './adjust.js';
 import { load, save, exportJSON, importJSON, reset, defaultState } from './store.js';
 import { mergeStates, forUpload } from './sync.js';
@@ -106,7 +107,7 @@ const MUSCLE_LABEL = Object.fromEntries(MUSCLES.map((m) => [m.id, m.label]));
 const fmtNum = (n) => Math.round(n).toLocaleString('en-AU');
 const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 // The release number. It must match CACHE in sw.js (a test checks); shown at the bottom of Settings.
-const APP_VERSION = 38;
+const APP_VERSION = 39;
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const subnav = (cur) => `<nav class="subnav" aria-label="Training">${[['plan', 'This week'], ['week', 'My week'], ['routine', 'Routine'], ['library', 'Library']]
   .map(([v, t]) => `<a href="#${v}" ${v === cur ? 'aria-current="page"' : ''}>${t}</a>`).join('')}</nav>`;
@@ -3558,6 +3559,91 @@ function applyTemplate(id) {
   syncRoutine(); commit();
 }
 
+// ---------- importing a routine from screenshots (Bevel or another app) ----------
+let rimp = { imgs: [], text: '', busy: false, result: null, error: '', undo: null, done: '' };
+const RIMP_ERRORS = {
+  offline: 'You’re offline. Reading screenshots needs an internet connection.',
+  timeout: 'Reading took too long and was stopped. Try fewer screenshots at a time.',
+  rate_limited: 'You’ve used today’s AI questions. Try again tomorrow.',
+  image_rejected: 'One of the images couldn’t be used. Try screenshots (PNG or JPG).',
+  not_set_up: 'Reading screenshots isn’t switched on for this site yet.',
+  unreadable: 'Those couldn’t be read as workouts. Try clear screenshots of each template.',
+  upstream_error: 'The AI isn’t available right now. Try again in a bit.', busy: 'The AI is busy. Try again in a moment.',
+};
+function importCard() {
+  const r = rimp.result;
+  const preview = r ? `<div class="avail-preview stack" role="status">
+      ${r.workouts.length ? `<span class="label">What Slotted read</span>
+      ${r.workouts.map((w) => `<div class="rimp-w"><b>${esc(w.name)}</b><ul class="small">${w.exercises.map((e) => `<li>${esc(e.name)}, ${e.sets} × ${esc(e.reps)}${e.startKg ? `, ${wt(e.startKg)} ${unitLabel(units())}` : ''}${e.known ? '' : ' <span class="badge">Not in the library</span>'}</li>`).join('')}</ul></div>`).join('')}
+      ${r.unmatched.length ? `<p class="small muted">Exercises marked “Not in the library” are kept with the name shown and the muscle group Slotted guessed. You can change them below after importing.</p>` : ''}
+      ${r.notes.length ? `<p class="small muted">Couldn’t read: ${esc(r.notes.join('; '))}</p>` : ''}
+      <p class="small">This replaces your current routine with ${plural(r.workouts.length, 'workout')}. Your logged workouts and progress stay.</p>
+      <div class="actions"><button type="button" class="primary" id="rimp-yes">Replace my routine</button><button type="button" class="ghost" id="rimp-no">Cancel</button></div>`
+      : `<p class="small">${esc(r.note || 'No workouts were found. Try clearer screenshots of each template.')}</p><div class="actions"><button type="button" class="ghost" id="rimp-no">Close</button></div>`}
+    </div>` : '';
+  return `<section class="card stack" style="margin-bottom:16px" aria-labelledby="rimp-h">
+    <h2 id="rimp-h">Import from Bevel or another app</h2>
+    <p class="muted small">In Bevel (or Strava, Hevy, Notes...), open each workout template and take a screenshot; scroll and take another for long ones. Add them all here and Slotted copies your workouts, sets, reps and weights. You check it before anything changes. Or paste the text instead.</p>
+    ${rimp.done ? `<div class="avail-done" role="status"><p class="small"><b>${esc(rimp.done)}</b></p>${rimp.undo ? '<div class="actions"><button type="button" class="ghost" id="rimp-undo">Undo</button></div>' : ''}</div>` : ''}
+    <div class="avail-photo">
+      <label class="btn" for="rimp-file">${icon('photo')}Add screenshots</label>
+      <input id="rimp-file" class="sr" type="file" accept="image/*" multiple>
+      ${rimp.imgs.length ? `<div class="avail-thumbs">${rimp.imgs.map((im, i) => `<span class="avail-thumb"><img src="${im.url}" alt="Screenshot ${i + 1}"><button type="button" data-rimpimg="${i}" aria-label="Remove screenshot ${i + 1}">×</button></span>`).join('')}</div>` : ''}
+      <p class="hint" style="margin:0">Up to ${ROUTINE_MAX_IMAGES} screenshots. They’re sent to the AI to be read and aren’t saved.</p>
+    </div>
+    <details class="rimp-paste"${rimp.text ? ' open' : ''}><summary>Paste text instead</summary>
+      <label class="sr" for="rimp-text">Your routine as text</label>
+      <textarea id="rimp-text" rows="5" maxlength="6000" placeholder="Push: Bench press 4x8 60kg, Incline DB press 3x10 20kg...">${esc(rimp.text)}</textarea>
+    </details>
+    ${rimp.error ? `<p class="errors" role="alert">${esc(rimp.error)}</p>` : ''}
+    <div class="actions"><button type="button" class="primary" id="rimp-go" ${rimp.busy ? 'disabled' : ''}>${rimp.busy ? 'Reading your workouts…' : 'Read my routine'}</button></div>
+    ${preview}
+  </section>`;
+}
+function wireImport() {
+  const file = document.getElementById('rimp-file');
+  if (!file) return;
+  file.addEventListener('change', async () => {
+    const picked = [...file.files].filter((f) => /^image\//.test(f.type)).slice(0, Math.max(0, ROUTINE_MAX_IMAGES - rimp.imgs.length));
+    if (file.files.length > picked.length) toast(`Up to ${ROUTINE_MAX_IMAGES} screenshots at a time.`);
+    for (const f of picked) { try { rimp.imgs.push(await shrinkImage(f)); } catch { toast('Couldn’t read that image. Try a screenshot, JPG or PNG.'); } }
+    rimp.result = null; rimp.error = ''; renderRoutine();
+  });
+  app.querySelectorAll('[data-rimpimg]').forEach((b) => b.addEventListener('click', () => { rimp.imgs.splice(Number(b.dataset.rimpimg), 1); renderRoutine(); }));
+  const text = document.getElementById('rimp-text');
+  if (text) text.addEventListener('input', () => { rimp.text = text.value; });
+  document.getElementById('rimp-go').addEventListener('click', async () => {
+    if (!rimp.imgs.length && !rimp.text.trim()) { rimp.error = 'Add a screenshot or paste your routine first.'; renderRoutine(); return; }
+    rimp = { ...rimp, busy: true, error: '', result: null, done: '' }; renderRoutine();
+    const res = await askRoutineCopy({ images: rimp.imgs.map(({ media_type, data }) => ({ media_type, data })), text: rimp.text.trim() });
+    rimp.busy = false;
+    if (res.error && res.error !== 'unreadable') rimp.error = RIMP_ERRORS[res.error] || RIMP_ERRORS.upstream_error;
+    else rimp.result = res.copy ? routineFromCopy(res.copy, { units: units(), groupOf: routineGroup, toKg }) : { workouts: [], unmatched: [], notes: [], note: res.note };
+    if (viewName() === 'routine') renderRoutine();
+  });
+  const no = document.getElementById('rimp-no');
+  if (no) no.addEventListener('click', () => { rimp.result = null; renderRoutine(); });
+  const yes = document.getElementById('rimp-yes');
+  if (yes) yes.addEventListener('click', () => {
+    const r = rimp.result;
+    rimp.undo = { routine: JSON.parse(JSON.stringify(state.routine)), sessions: state.profile.sessionsPerWeek };
+    state.routine = { ...state.routine, mode: 'custom', startWeek: currentWeek(), workouts: r.workouts.map((w) => ({
+      id: uid(), name: w.name, exercises: w.exercises.map((e) => ({ id: uid(), name: e.name, sets: e.sets, reps: e.reps, group: e.group, ...(e.startKg ? { startKg: e.startKg } : {}) })),
+    })) };
+    if (state.profile.sessionsPerWeek < r.workouts.length) state.profile.sessionsPerWeek = Math.min(6, r.workouts.length);
+    syncRoutine(); commit();
+    rimp = { imgs: [], text: '', busy: false, result: null, error: '', undo: rimp.undo, done: `Imported ${plural(r.workouts.length, 'workout')}. Your plan now uses them.` };
+    renderRoutine(); renderSideWeek();
+  });
+  const undo = document.getElementById('rimp-undo');
+  if (undo) undo.addEventListener('click', () => {
+    state.routine = rimp.undo.routine; state.profile.sessionsPerWeek = rimp.undo.sessions;
+    syncRoutine(); commit();
+    rimp = { imgs: [], text: '', busy: false, result: null, error: '', undo: null, done: 'Your previous routine is back.' };
+    renderRoutine(); renderSideWeek();
+  });
+}
+
 function renderRoutine() {
   const r = state.routine;
   const custom = r.mode === 'custom';
@@ -3576,6 +3662,7 @@ function renderRoutine() {
       <p class="page-sub">Already have a program? Enter it here. Slotted keeps your workouts and fits them around your week.</p>
     </div>
   </div>
+  ${importCard()}
   <div class="chips" role="radiogroup" aria-label="Which routine to follow" style="margin-bottom:20px">
     ${chip('rmode', 'custom', 'My own routine', custom)}
     ${chip('rmode', 'suggested', 'Slotted’s suggested plan', !custom, SPLIT_NAMES[n])}
@@ -3640,6 +3727,7 @@ function renderRoutine() {
     if (r.mode === 'custom' && !r.startWeek) r.startWeek = currentWeek();
     syncRoutine(); commit(); renderRoutine();
   }));
+  wireImport();
   if (!custom) return;
 
   app.querySelectorAll('[data-template]').forEach((b) => b.addEventListener('click', () => {

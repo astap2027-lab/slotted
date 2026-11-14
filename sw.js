@@ -1,6 +1,6 @@
 // Offline support: the app comes from the network when it can (so updates arrive straight away) and from the cache when offline.
-const CACHE = 'slotted-v38';
-const SHELL = ['./', './index.html', './styles.css', './js/app.js', './js/scheduler.js', './js/progress.js', './js/stats.js', './js/exercises.js', './js/units.js', './js/tracking.js', './js/ical.js', './js/timetable.js', './js/adjust.js', './js/freshness.js', './js/anatomy.js', './js/workout.js', './js/readiness.js', './js/coach.js', './js/store.js', './privacy', './js/sync.js', './manifest.webmanifest', './icon.svg', './icons/icon-192.png', './icons/icon-512.png'];
+const CACHE = 'slotted-v39';
+const SHELL = ['./', './index.html', './styles.css', './js/app.js', './js/scheduler.js', './js/progress.js', './js/stats.js', './js/exercises.js', './js/units.js', './js/tracking.js', './js/ical.js', './js/routine-import.js', './js/timetable.js', './js/adjust.js', './js/freshness.js', './js/anatomy.js', './js/workout.js', './js/readiness.js', './js/coach.js', './js/store.js', './privacy', './js/sync.js', './manifest.webmanifest', './icon.svg', './icons/icon-192.png', './icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
