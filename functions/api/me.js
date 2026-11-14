@@ -9,7 +9,7 @@ export async function onRequestGet({ request, env }) {
   return json({
     signedIn: true,
     available,
-    user: { name: user.name, email: user.email },
+    user: { id: user.id, name: user.name, email: user.email },
     strava: { available: !!env.STRAVA_CLIENT_ID, connected: !!strava, athlete: strava ? strava.athlete_name : null },
   });
 }

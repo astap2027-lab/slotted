@@ -11,7 +11,7 @@ import {
   timetableContext, askTimetable, askTimetablePhotos, BLOCK_TYPES, planWithFlex, appliesTo, SPORT_EFFORTS, sportEffort, photoPlan, PHOTO_MAX_IMAGES,
   calendarBlocks, calendarDiff, CAL_TYPES, ruleKey, guessType, guessEffort,
 } from './timetable.js';
-import { eventsBetween, parseICS, calendarUrl } from './ical.js';
+import { eventsBetween, parseICS, calendarUrl, sessionEvents, buildICS } from './ical.js';
 import { proposeChanges, proposeMornings, applyProposal } from './adjust.js';
 import { load, save, exportJSON, importJSON, reset, defaultState } from './store.js';
 import { mergeStates, forUpload } from './sync.js';
@@ -104,7 +104,7 @@ const MUSCLE_LABEL = Object.fromEntries(MUSCLES.map((m) => [m.id, m.label]));
 const fmtNum = (n) => Math.round(n).toLocaleString('en-AU');
 const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 // The release number. It must match CACHE in sw.js (a test checks); shown at the bottom of Settings.
-const APP_VERSION = 33;
+const APP_VERSION = 34;
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const subnav = (cur) => `<nav class="subnav" aria-label="Training">${[['plan', 'This week'], ['week', 'My week'], ['routine', 'Routine'], ['library', 'Library']]
   .map(([v, t]) => `<a href="#${v}" ${v === cur ? 'aria-current="page"' : ''}>${t}</a>`).join('')}</nav>`;
@@ -1412,6 +1412,89 @@ async function syncCalendars({ force = false, after = null } = {}) {
 
 const calAgo = (t) => { const m = Math.round((Date.now() - t) / 60000); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : `at ${new Date(t).toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' })}`; };
 
+// ---------- gym sessions in the user's calendar app ----------
+// This week's plan and next week's draft as calendar events. Worked out by the app and saved with the synced data,
+// so the feed (/api/calendar/feed/<user>/<token>.ics) only has to write them out.
+function exportWeeks() {
+  const key = currentWeek();
+  const e = state.history[key] || {};
+  const isShort = (s) => (e.shortKeys || []).includes(s.key);
+  const toItem = (s, short) => ({ key: s.key, name: s.name, day: s.day, start: s.start, end: short ? Math.min(s.end, s.start + 30) : s.end, short, exercises: shownExercises(s, short).map((x) => `${x.name} ${x.sets}×${x.reps}`) });
+  return [
+    { key, sessions: (e.plan || []).map((s) => toItem(s, isShort(s))) },
+    { key: addWeeks(key, 1), sessions: nextWeekDraft(key).plan.map((s) => toItem(s, !!s.short)) },
+  ];
+}
+// Keeps state.calendarExport up to date when the calendar link is on; returns the state for uploading.
+function refreshExport() {
+  if (state.calendarFeed) {
+    try { state.calendarExport = { at: Date.now(), events: sessionEvents(exportWeeks()) }; } catch { /* keep the last good copy */ }
+  }
+  return state;
+}
+const newFeedToken = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(24)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const feedUrl = () => (state.calendarFeed && account.user && account.user.id ? `${location.origin}/api/calendar/feed/${encodeURIComponent(account.user.id)}/${state.calendarFeed.token}.ics` : '');
+
+function feedPanel() {
+  const signedIn = account.status === 'signedIn';
+  const url = signedIn ? feedUrl() : '';
+  const webcal = url.replace(/^https?:/, 'webcal:');
+  return `<div class="feed stack">
+    <h3>Show my gym sessions in my calendar</h3>
+    ${signedIn && url ? `
+      <p class="muted small">Add this link to your calendar app once. Your sessions for this week and next show up there and follow any changes you make in Slotted.</p>
+      <div class="field"><label for="feed-url">Your Slotted calendar link</label><input id="feed-url" type="text" readonly value="${esc(url)}"></div>
+      <div class="actions">
+        <button type="button" id="feed-copy">Copy link</button>
+        <a class="btn" href="${esc(webcal)}">Add to Apple Calendar</a>
+        <a class="btn" href="https://calendar.google.com/calendar/render?cid=${encodeURIComponent(webcal)}" target="_blank" rel="noopener">Add to Google Calendar</a>
+      </div>
+      <p class="muted small">Google Calendar checks for changes every few hours, so a moved session can take a while to show there. Apple Calendar can check more often (Calendar settings, Accounts, Refresh). Like your calendar links, this link is private: anyone with it can see your gym sessions.</p>
+      <div class="actions"><button type="button" class="ghost" id="feed-new">Make a new link</button><button type="button" class="ghost danger" id="feed-off">Turn off</button></div>`
+    : signedIn ? `
+      <p class="muted small">Get a private link to add to Google, Apple or Outlook calendar. Your gym sessions for this week and next show up there and follow changes you make in Slotted.</p>
+      <div class="actions"><button type="button" class="primary" id="feed-on">Create my calendar link</button></div>`
+    : `<p class="muted small">Sign in (above) to get a link that keeps your calendar up to date. Without an account you can still download this week’s and next week’s sessions as a file and open it in your calendar app; it won’t update by itself.</p>`}
+    <div class="actions"><button type="button" class="ghost" id="feed-file">Download sessions as a calendar file</button></div>
+  </div>`;
+}
+
+function wireFeed() {
+  const on = document.getElementById('feed-on');
+  if (on) on.addEventListener('click', () => {
+    state.calendarFeed = { token: newFeedToken(), since: Date.now() };
+    refreshExport(); commit(); pushNow(); renderSettings();
+    toast('Calendar link ready');
+  });
+  const again = document.getElementById('feed-new');
+  if (again) again.addEventListener('click', () => {
+    state.calendarFeed = { token: newFeedToken(), since: Date.now() };
+    refreshExport(); commit(); pushNow(); renderSettings();
+    toast('New link made. The old one has stopped working.');
+  });
+  const off = document.getElementById('feed-off');
+  if (off) off.addEventListener('click', () => {
+    delete state.calendarFeed; delete state.calendarExport;
+    commit(); pushNow(); renderSettings();
+    toast('Calendar link turned off');
+  });
+  const copy = document.getElementById('feed-copy');
+  if (copy) copy.addEventListener('click', async () => {
+    const box = document.getElementById('feed-url');
+    try { await navigator.clipboard.writeText(box.value); toast('Link copied'); } catch { box.select(); toast('Select the link and copy it'); }
+  });
+  const file = document.getElementById('feed-file');
+  if (file) file.addEventListener('click', () => {
+    const text = buildICS(sessionEvents(exportWeeks()));
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'text/calendar' }));
+    a.download = 'slotted-sessions.ics';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    toast('Calendar file downloaded');
+  });
+}
+
 function calendarsPanel() {
   const cals = calList();
   return `<section class="card stack" id="calendars-card">
@@ -1444,10 +1527,12 @@ function calendarsPanel() {
       <p class="small muted">Pick <i>School timetable</i> for a school app: its classes become one School block a day (study periods don’t count), replacing your typed-in school times on those days.</p>
     </details>
     <p class="muted small">A calendar link works like a password: anyone with it can see that calendar. It’s saved with your Slotted data, and event names are shared with the coach when you ask it something. Remove it here any time.</p>
+    ${feedPanel()}
   </section>`;
 }
 
 function wireCalendars() {
+  wireFeed();
   const form = document.getElementById('cal-add');
   if (!form) return;
   form.addEventListener('submit', async (ev) => {
@@ -3812,6 +3897,16 @@ const EQUIP_LABEL = { gym: 'a full gym', home: 'a home gym (dumbbells, bench, pu
 
 // Next week for the coach: the real commitments (Week A/B, repeats and one-offs) and the draft plan Slotted's planner makes around them.
 // The draft is computed here, never by the AI, and nothing is saved.
+// Next week's plan: the saved one if it exists, otherwise the planner's draft (never saved).
+function nextWeekDraft(key) {
+  const nk = addWeeks(key, 1);
+  const e = (state.history || {})[nk] || {};
+  if (e.plan && e.plan.length) return { plan: e.plan, warnings: e.warnings || [] };
+  const skip = [...new Set([...(e.skipDays || []), ...(state.restDays || [])])];
+  const res = planWithFlex(state.profile, weekBlocks(state, nk), state.window, { busy: e.busy, skipDays: skip, keys: keysFor(nk, e.busy), keepOrder: keepOrder(), dayWindows: dayWindows(state, nk) });
+  return { plan: res.sessions, warnings: res.warnings || [] };
+}
+
 function nextWeekLines(key) {
   const nk = addWeeks(key, 1);
   const out = [`Next week (starts ${DAYS[0]} ${fmtDate(keyToDate(nk))}${state.useAB ? `, Week ${typeOf(nk)}` : ''}):`];
@@ -3820,12 +3915,7 @@ function nextWeekLines(key) {
   const e = (state.history || {})[nk] || {};
   const skip = [...new Set([...(e.skipDays || []), ...(state.restDays || [])])];
   if (skip.length) out.push(`Days they won't train next week: ${skip.map((d) => DAYS_SHORT[d]).join(', ')}.`);
-  let plan = e.plan;
-  let warnings = e.warnings || [];
-  if (!plan || !plan.length) {
-    const res = planWithFlex(state.profile, weekBlocks(state, nk), state.window, { busy: e.busy, skipDays: skip, keys: keysFor(nk, e.busy), keepOrder: keepOrder(), dayWindows: dayWindows(state, nk) });
-    plan = res.sessions; warnings = res.warnings || [];
-  }
+  const { plan, warnings } = nextWeekDraft(key);
   const sessionLen = Number(state.profile.sessionLength) || 60;
   out.push(`Free windows next week where a ${sessionLen} minute gym session fits (training hours minus commitments and travel):`);
   out.push(...windowLines(DAYS.map((_, d) => freeGaps(weekBlocks(state, nk), d, windowFor(state, nk, d))), sessionLen));
@@ -4088,7 +4178,7 @@ async function pushNow(retry = true) {
       method: 'PUT',
       credentials: 'same-origin',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ data: forUpload(state), baseUpdatedAt: state.syncedAt || 0 }),
+      body: JSON.stringify({ data: forUpload(refreshExport()), baseUpdatedAt: state.syncedAt || 0 }),
     });
     if (res.ok) {
       state.syncedAt = (await res.json()).updatedAt;

@@ -959,3 +959,7 @@ td .effort-opts { max-width: 300px; }
 .cal-help ul { margin: 8px 0; padding-left: 1.2em; display: grid; gap: 6px; }
 .cal-notice { border-color: var(--lime-line); margin-bottom: 16px; }
 .linkish { background: none; border: 0; padding: 0 4px; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
+
+/* ---------- gym sessions in your calendar ---------- */
+.feed { margin-top: 10px; padding-top: 14px; border-top: 1px solid var(--line); }
+.feed input[readonly] { font-size: 13.5px; }

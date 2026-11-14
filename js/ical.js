@@ -241,3 +241,57 @@ function endOf(e, startMs, localTz) {
 
 // "webcal://" links are ordinary https links for calendar apps.
 export const calendarUrl = (url) => String(url || '').trim().replace(/^webcals?:\/\//i, 'https://');
+
+// ---------- writing a calendar (Slotted's gym sessions for calendar apps) ----------
+// Planned sessions as calendar events. weeks: [{ key: 'YYYY-MM-DD' (Monday), sessions: [{ key, name, day, start, end
+// (minutes), short, exercises: ['Bench press 3×6–8', ...] }] }]. Times are the plan's wall-clock times in `tz`.
+export function sessionEvents(weeks, { tz } = {}) {
+  const zone = cleanZone(tz) || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const out = [];
+  for (const w of weeks || []) {
+    const [y, mo, d] = String(w.key).split('-').map(Number);
+    for (const s of w.sessions || []) {
+      const date = fromDayNum(dayNum({ y, mo, d }) + s.day);
+      const at = (min) => new Date(fromZone({ ...date, h: Math.floor(min / 60), mi: min % 60, s: 0 }, zone)).toISOString();
+      out.push({
+        uid: `${w.key}-${s.key}@slotted`,
+        title: `Gym: ${s.name}${s.short ? ' (short)' : ''}`,
+        start: at(s.start), end: at(s.end),
+        notes: [...(s.exercises || []), '', 'Planned by Slotted. When your plan changes in Slotted, this calendar follows.'].join('\n').trim(),
+      });
+    }
+  }
+  return out;
+}
+
+const icsEscape = (v) => String(v || '').replace(/\\/g, '\\\\').replace(/\r?\n/g, '\\n').replace(/[,;]/g, (m) => `\\${m}`);
+const icsTime = (iso) => new Date(iso).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+// Lines longer than 75 bytes are folded onto continuation lines that start with a space.
+function icsFold(line) {
+  const enc = new TextEncoder();
+  const parts = [];
+  let cur = '';
+  let size = 0;
+  for (const ch of line) {
+    const n = enc.encode(ch).length;
+    if (size + n > (parts.length ? 74 : 75)) { parts.push(cur); cur = ''; size = 0; }
+    cur += ch; size += n;
+  }
+  parts.push(cur);
+  return parts.join('\r\n ');
+}
+
+// A whole calendar file from events ({ uid, title, start, end (ISO), notes }).
+export function buildICS(events, { name = 'Slotted gym sessions', stamp = Date.now() } = {}) {
+  const lines = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Slotted//Gym sessions//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
+    `X-WR-CALNAME:${icsEscape(name)}`, 'REFRESH-INTERVAL;VALUE=DURATION:PT1H', 'X-PUBLISHED-TTL:PT1H',
+  ];
+  for (const e of events || []) {
+    if (!e || !e.uid || !e.start || !e.end || Number.isNaN(Date.parse(e.start)) || Number.isNaN(Date.parse(e.end))) continue;
+    lines.push('BEGIN:VEVENT', `UID:${icsEscape(e.uid)}`, `DTSTAMP:${icsTime(stamp)}`, `DTSTART:${icsTime(e.start)}`, `DTEND:${icsTime(e.end)}`,
+      `SUMMARY:${icsEscape(e.title)}`, ...(e.notes ? [`DESCRIPTION:${icsEscape(e.notes)}`] : []), 'TRANSP:OPAQUE', 'END:VEVENT');
+  }
+  lines.push('END:VCALENDAR');
+  return `${lines.map(icsFold).join('\r\n')}\r\n`;
+}
