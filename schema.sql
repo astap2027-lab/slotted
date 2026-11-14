@@ -33,3 +33,14 @@ CREATE TABLE IF NOT EXISTS strava (
   refresh_token TEXT NOT NULL,
   expires_at INTEGER NOT NULL
 );
+
+-- Google Calendar connection (writing gym sessions and Slotted commitments into a "Slotted" calendar in their
+-- Google account). Tokens are encrypted with TOKEN_KEY. Added November 2026: run this part once in the D1 console.
+CREATE TABLE IF NOT EXISTS google_calendar (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  refresh_token TEXT NOT NULL,
+  access_token TEXT,
+  expires_at INTEGER,
+  calendar_id TEXT,
+  connected_at INTEGER NOT NULL
+);

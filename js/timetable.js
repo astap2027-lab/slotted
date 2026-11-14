@@ -95,7 +95,7 @@ export function calendarBlocks(events, cal, rules = {}, key) {
   // "Work it out" treats a calendar that reads as a school timetable as one.
   const asSchool = cal.type === 'school' || ((!cal.type || cal.type === 'auto') && looksLikeSchool(events));
   for (const e of events || []) {
-    if (e.free || (e.uid && /@slotted$/i.test(e.uid))) continue; // "free" events, and Slotted's own feed
+    if (e.free || (e.uid && /@slotted$/i.test(e.uid)) || /Added by Slotted/.test(e.notes || '')) continue; // "free" events, and Slotted's own events
     if (CAL_CANCELLED.test(e.title || '')) continue; // some schools mark cancelled classes in the name
     const rule = rules[ruleKey(e.title)] || {};
     if (rule.ignore) continue;
