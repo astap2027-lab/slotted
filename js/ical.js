@@ -110,6 +110,7 @@ export function parseICS(text, { tz } = {}) {
       case 'UID': cur.uid = value.trim(); break;
       case 'SUMMARY': cur.summary = unescapeText(value); break;
       case 'LOCATION': cur.location = unescapeText(value); break;
+      case 'DESCRIPTION': cur.description = unescapeText(value).slice(0, 2000); break;
       case 'DTSTART': cur.start = parseDate(value, params, tz); break;
       case 'DTEND': cur.end = parseDate(value, params, tz); break;
       case 'DURATION': cur.duration = parseDuration(value); break;
@@ -192,7 +193,7 @@ export function eventsBetween(text, fromMs, toMs, { tz } = {}) {
     if (e.cancelled || endMs <= fromMs || startMs >= toMs) return;
     const s = inZone(startMs, localTz);
     const en = inZone(Math.max(startMs, endMs - (allDay ? 1 : 0)), localTz);
-    const item = { uid: e.uid || '', title: e.summary || '', location: e.location || '', start: startMs, end: endMs, allDay, free: !!e.free, date: ymd(s) };
+    const item = { uid: e.uid || '', title: e.summary || '', location: e.location || '', notes: e.description || '', start: startMs, end: endMs, allDay, free: !!e.free, date: ymd(s) };
     if (allDay) {
       item.days = [];
       for (let n = dayNum(s); n <= dayNum(en) && item.days.length < 31; n++) item.days.push(ymd(fromDayNum(n)));
@@ -294,4 +295,20 @@ export function buildICS(events, { name = 'Slotted gym sessions', stamp = Date.n
   }
   lines.push('END:VCALENDAR');
   return `${lines.map(icsFold).join('\r\n')}\r\n`;
+}
+
+// Commitments added in Slotted as calendar events. weeks: [{ key, blocks: [{ id, day, start, end ('HH:MM'), label, type }] }].
+const TYPE_WORDS = { school: 'School', sport: 'Sport', work: 'Work', other: 'Commitment' };
+export function blockEvents(weeks, { tz } = {}) {
+  const zone = cleanZone(tz) || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const out = [];
+  for (const w of weeks || []) {
+    const [y, mo, d] = String(w.key).split('-').map(Number);
+    for (const b of w.blocks || []) {
+      const date = fromDayNum(dayNum({ y, mo, d }) + b.day);
+      const at = (t) => { const [h, mi] = String(t).split(':').map(Number); return new Date(fromZone({ ...date, h, mi, s: 0 }, zone)).toISOString(); };
+      out.push({ uid: `${w.key}-c-${b.id}@slotted`, title: b.label || TYPE_WORDS[b.type] || 'Commitment', start: at(b.start), end: at(b.end), notes: `${TYPE_WORDS[b.type] || 'Commitment'} you added in Slotted.` });
+    }
+  }
+  return out;
 }

@@ -3191,6 +3191,7 @@ function parseICS(text, { tz } = {}) {
       case 'UID': cur.uid = value.trim(); break;
       case 'SUMMARY': cur.summary = unescapeText(value); break;
       case 'LOCATION': cur.location = unescapeText(value); break;
+      case 'DESCRIPTION': cur.description = unescapeText(value).slice(0, 2000); break;
       case 'DTSTART': cur.start = parseDate(value, params, tz); break;
       case 'DTEND': cur.end = parseDate(value, params, tz); break;
       case 'DURATION': cur.duration = parseDuration(value); break;
@@ -3273,7 +3274,7 @@ function eventsBetween(text, fromMs, toMs, { tz } = {}) {
     if (e.cancelled || endMs <= fromMs || startMs >= toMs) return;
     const s = inZone(startMs, localTz);
     const en = inZone(Math.max(startMs, endMs - (allDay ? 1 : 0)), localTz);
-    const item = { uid: e.uid || '', title: e.summary || '', location: e.location || '', start: startMs, end: endMs, allDay, free: !!e.free, date: ymd(s) };
+    const item = { uid: e.uid || '', title: e.summary || '', location: e.location || '', notes: e.description || '', start: startMs, end: endMs, allDay, free: !!e.free, date: ymd(s) };
     if (allDay) {
       item.days = [];
       for (let n = dayNum(s); n <= dayNum(en) && item.days.length < 31; n++) item.days.push(ymd(fromDayNum(n)));
@@ -3377,6 +3378,22 @@ function buildICS(events, { name = 'Slotted gym sessions', stamp = Date.now() } 
   return `${lines.map(icsFold).join('\r\n')}\r\n`;
 }
 
+// Commitments added in Slotted as calendar events. weeks: [{ key, blocks: [{ id, day, start, end ('HH:MM'), label, type }] }].
+const TYPE_WORDS = { school: 'School', sport: 'Sport', work: 'Work', other: 'Commitment' };
+function blockEvents(weeks, { tz } = {}) {
+  const zone = cleanZone(tz) || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const out = [];
+  for (const w of weeks || []) {
+    const [y, mo, d] = String(w.key).split('-').map(Number);
+    for (const b of w.blocks || []) {
+      const date = fromDayNum(dayNum({ y, mo, d }) + b.day);
+      const at = (t) => { const [h, mi] = String(t).split(':').map(Number); return new Date(fromZone({ ...date, h, mi, s: 0 }, zone)).toISOString(); };
+      out.push({ uid: `${w.key}-c-${b.id}@slotted`, title: b.label || TYPE_WORDS[b.type] || 'Commitment', start: at(b.start), end: at(b.end), notes: `${TYPE_WORDS[b.type] || 'Commitment'} you added in Slotted.` });
+    }
+  }
+  return out;
+}
+
 // ---- js/timetable.js ----
 // The adaptable timetable: which commitments apply in a given week (Week A/B, every few weeks,
 // one-off changes), travel and preparation time, per-day training hours, and changes described in
@@ -3474,7 +3491,7 @@ function calendarBlocks(events, cal, rules = {}, key) {
   // "Work it out" treats a calendar that reads as a school timetable as one.
   const asSchool = cal.type === 'school' || ((!cal.type || cal.type === 'auto') && looksLikeSchool(events));
   for (const e of events || []) {
-    if (e.free || (e.uid && /@slotted$/i.test(e.uid))) continue; // "free" events, and Slotted's own feed
+    if (e.free || (e.uid && /@slotted$/i.test(e.uid)) || /Added by Slotted/.test(e.notes || '')) continue; // "free" events, and Slotted's own events
     if (CAL_CANCELLED.test(e.title || '')) continue; // some schools mark cancelled classes in the name
     const rule = rules[ruleKey(e.title)] || {};
     if (rule.ignore) continue;
@@ -4693,6 +4710,7 @@ const commit = () => {
   state.updatedAt = Date.now();
   if (!save(state)) toast('Couldn’t save on this device. Check your browser storage settings.');
   schedulePush();
+  scheduleGcal();
 };
 
 function toast(msg) {
@@ -4753,7 +4771,7 @@ const MUSCLE_LABEL = Object.fromEntries(MUSCLES.map((m) => [m.id, m.label]));
 const fmtNum = (n) => Math.round(n).toLocaleString('en-AU');
 const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 // The release number. It must match CACHE in sw.js (a test checks); shown at the bottom of Settings.
-const APP_VERSION = 37;
+const APP_VERSION = 38;
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const subnav = (cur) => `<nav class="subnav" aria-label="Training">${[['plan', 'This week'], ['week', 'My week'], ['routine', 'Routine'], ['library', 'Library']]
   .map(([v, t]) => `<a href="#${v}" ${v === cur ? 'aria-current="page"' : ''}>${t}</a>`).join('')}</nav>`;
@@ -6093,12 +6111,87 @@ function refreshExport() {
 const newFeedToken = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(24)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const feedUrl = () => (state.calendarFeed && account.user && account.user.id ? `${location.origin}/api/calendar/feed/${encodeURIComponent(account.user.id)}/${state.calendarFeed.token}.ics` : '');
 
+// ---------- writing to Google Calendar ----------
+// When connected, the app works out this week's and next week's gym sessions and the commitments typed into Slotted,
+// and the server makes the "Slotted" calendar in their Google account match (functions/api/calendar/google/sync.js).
+let gcalTimer = null;
+let gcalSig = '';
+let gcalStatus = { busy: false, at: 0, error: '', counts: null };
+const gcalOn = () => state.setupDone && account.status === 'signedIn' && account.gcal && account.gcal.connected;
+function gcalEvents() {
+  const key = currentWeek();
+  if (state.setupDone) ensurePlan(key); // never send a week before its plan exists
+  const typed = (wk) => weekBlocks(state, wk).filter((b) => !b.cal && toMin(b.end) > toMin(b.start));
+  return [...sessionEvents(exportWeeks()), ...blockEvents([{ key, blocks: typed(key) }, { key: addWeeks(key, 1), blocks: typed(addWeeks(key, 1)) }])];
+}
+function scheduleGcal(ms = 4000) {
+  if (!gcalOn()) return;
+  clearTimeout(gcalTimer);
+  gcalTimer = setTimeout(() => gcalSync(), ms);
+}
+async function gcalSync({ force = false } = {}) {
+  if (!gcalOn() || gcalStatus.busy) return;
+  let events;
+  try { events = gcalEvents(); } catch { return; }
+  const sig = JSON.stringify(events);
+  if (!force && sig === gcalSig) return;
+  gcalStatus = { ...gcalStatus, busy: true };
+  const from = keyToDate(currentWeek()).toISOString();
+  const to = keyToDate(addWeeks(currentWeek(), 2)).toISOString();
+  try {
+    const res = await fetch('/api/calendar/google/sync', {
+      method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ events, from, to, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) { gcalSig = sig; gcalStatus = { busy: false, at: Date.now(), error: '', counts: data }; } else {
+      gcalStatus = { busy: false, at: gcalStatus.at, error: data.error || 'unreachable', counts: null };
+      if (data.error === 'not_connected') account.gcal = { ...account.gcal, connected: false };
+    }
+  } catch { gcalStatus = { busy: false, at: gcalStatus.at, error: 'offline', counts: null }; }
+  if (viewName() === 'profile') renderSettings();
+}
+const GCAL_ERRORS = { reconnect: 'Google stopped letting Slotted in. Disconnect and connect again.', busy: 'Google is busy. Slotted will try again soon.', offline: 'You’re offline. Slotted will update Google when you’re back online.', unreachable: 'Couldn’t reach Google Calendar. Slotted will try again.', not_connected: 'Not connected any more. Connect again.' };
+
+function gcalPanel() {
+  if (account.status !== 'signedIn' || !account.gcal) return '';
+  const g = account.gcal;
+  if (!g.available) return g.needsSetup ? '<p class="small muted">Writing to Google Calendar isn’t switched on for this site yet.</p>' : '';
+  if (!g.connected) {
+    return `<div class="feed stack">
+      <h3>Add to my Google Calendar</h3>
+      <p class="muted small">Slotted makes a calendar called <b>Slotted</b> in your Google account and keeps it up to date with your gym sessions for this week and next, and the commitments you add in Slotted. Changes show in Google within a minute. Slotted can only see and change that one calendar.</p>
+      <div class="actions"><a class="btn primary" href="/api/calendar/google/start">Connect Google Calendar</a></div>
+    </div>`;
+  }
+  const c = gcalStatus.counts;
+  return `<div class="feed stack">
+    <h3>Google Calendar</h3>
+    <p class="muted small">Connected. Your gym sessions and the commitments you add in Slotted go into the <b>Slotted</b> calendar in Google, and move when your plan changes. Change them in Slotted, not in Google.</p>
+    <p class="small ${gcalStatus.error ? 'note-warn' : 'muted'}">${gcalStatus.busy ? 'Updating Google…' : gcalStatus.error ? esc(GCAL_ERRORS[gcalStatus.error] || GCAL_ERRORS.unreachable) : gcalStatus.at ? `Updated ${calAgo(gcalStatus.at)}${c && (c.added || c.updated || c.removed) ? ` (${[c.added ? `${c.added} added` : '', c.updated ? `${c.updated} changed` : '', c.removed ? `${c.removed} removed` : ''].filter(Boolean).join(', ')})` : ''}` : 'Waiting to update'}</p>
+    <div class="actions"><button type="button" id="gcal-now" ${gcalStatus.busy ? 'disabled' : ''}>Update now</button><button type="button" class="ghost danger" id="gcal-off">Disconnect</button></div>
+  </div>`;
+}
+
+function wireGcal() {
+  const now = document.getElementById('gcal-now');
+  if (now) now.addEventListener('click', () => gcalSync({ force: true }));
+  const off = document.getElementById('gcal-off');
+  if (off) off.addEventListener('click', async () => {
+    try { await fetch('/api/calendar/google/disconnect', { method: 'POST', credentials: 'same-origin' }); } catch { /* ignore */ }
+    account.gcal = { ...account.gcal, connected: false };
+    gcalSig = ''; gcalStatus = { busy: false, at: 0, error: '', counts: null };
+    renderSettings();
+    toast('Google Calendar disconnected. The Slotted calendar stays in Google; delete it there if you like.');
+  });
+}
+
 function feedPanel() {
   const signedIn = account.status === 'signedIn';
   const url = signedIn ? feedUrl() : '';
   const webcal = url.replace(/^https?:/, 'webcal:');
   return `<div class="feed stack">
-    <h3>Show my gym sessions in my calendar</h3>
+    <h3>Show my gym sessions in Apple, Outlook or another calendar app</h3>
     ${signedIn && url ? `
       <p class="muted small">Add this link to your calendar app once. Your sessions for this week and next show up there and follow any changes you make in Slotted.</p>
       <div class="field"><label for="feed-url">Your Slotted calendar link</label><input id="feed-url" type="text" readonly value="${esc(url)}"></div>
@@ -6185,12 +6278,14 @@ function calendarsPanel() {
       <p class="small muted">Pick <i>School timetable</i> for a school app: its classes become one School block a day (study periods don’t count), replacing your typed-in school times on those days.</p>
     </details>
     <p class="muted small">A calendar link works like a password: anyone with it can see that calendar. It’s saved with your Slotted data, and event names are shared with the coach when you ask it something. Remove it here any time.</p>
+    ${gcalPanel()}
     ${feedPanel()}
   </section>`;
 }
 
 function wireCalendars() {
   wireFeed();
+  wireGcal();
   const form = document.getElementById('cal-add');
   if (!form) return;
   form.addEventListener('submit', async (ev) => {
@@ -8813,6 +8908,7 @@ async function loadAccount() {
   }
   if (account.status === 'signedIn') await pull();
   refreshAccountViews();
+  scheduleGcal(0);
 }
 
 async function pull() {
@@ -8897,6 +8993,11 @@ function showReturnMessage() {
   const q = new URLSearchParams(location.search);
   const msgs = {
     signin: { ok: 'Signed in. Your training now syncs across your devices.', cancelled: 'Sign-in cancelled.', failed: 'Sign-in didn’t work. Try again.' },
+    gcal: {
+      connected: 'Google Calendar connected. Your gym sessions and commitments are being added to a calendar called Slotted.',
+      cancelled: 'Google Calendar connection cancelled.', noscope: 'Slotted needs permission to make its own calendar. Try again and allow it.',
+      signin: 'Sign in first, then connect Google Calendar.', failed: 'Google Calendar didn’t connect. Try again.',
+    },
     strava: {
       connected: 'Strava connected. Your activities now show on your week.', cancelled: 'Strava connection cancelled.',
       noscope: 'Strava needs permission to see your activities. Try connecting again and leave activity access ticked.',
@@ -8907,7 +9008,7 @@ function showReturnMessage() {
     const v = q.get(k);
     if (v && table[v]) setTimeout(() => toast(table[v]), 300);
   }
-  if (q.has('signin') || q.has('strava')) history.replaceState(null, '', location.pathname + location.hash);
+  if (q.has('signin') || q.has('strava') || q.has('gcal')) history.replaceState(null, '', location.pathname + location.hash);
 }
 
 // ---------- Strava ----------
