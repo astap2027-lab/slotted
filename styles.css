@@ -969,3 +969,10 @@ td .effort-opts { max-width: 300px; }
 /* ---------- gym sessions in your calendar ---------- */
 .feed { margin-top: 10px; padding-top: 14px; border-top: 1px solid var(--line); }
 .feed input[readonly] { font-size: 13.5px; }
+
+/* ---------- calendar events in My week ---------- */
+.tag.cal-tag { background: var(--surface-2); color: var(--text-2); border: 1px solid var(--line); }
+.cal-item-row { border: 1px dashed var(--line); }
+.cal-item-row .item-edit:hover span, .cal-item-row .item-edit span { text-decoration: none; }
+.seg-small { margin: 6px 0 2px; }
+.seg-small button { min-height: 30px; font-size: 13.5px; }
