@@ -595,6 +595,17 @@ export function streakInfo(history, currentKey, target, sportCreditFor) {
 
 // Planned sessions as rows for a week view: sorted by day and time, marked as a draft (next week) or done.
 export function sessionRows(plan, { draft = false, done = [] } = {}) {
-  return (plan || []).map((s) => ({ key: s.key, name: s.name, day: s.day, start: s.start, end: s.end, short: !!s.short, draft, done: done.includes(s.key) }))
+  return (plan || []).map((s) => ({ key: s.key, name: s.name, day: s.day, start: s.start, end: s.end, short: !!s.short, draft, done: done.includes(s.key), moved: !!s.pinned }))
     .sort((a, b) => a.day - b.day || a.start - b.start);
+}
+
+// Sessions the athlete moved themselves (pins: { [key]: { day, start, end } }) taken from a first planner run and put
+// at their chosen times. The planner then places the rest around them (`fixed`).
+export function pinnedPlan(base, pins = {}) {
+  const pinned = [];
+  for (const s of base || []) {
+    const p = pins[s.key];
+    if (p && Number.isInteger(p.day) && p.end > p.start) pinned.push({ ...s, day: p.day, start: p.start, end: p.end, pinned: true, short: s.short });
+  }
+  return { pinned, pinnedKeys: new Set(pinned.map((s) => s.key)) };
 }

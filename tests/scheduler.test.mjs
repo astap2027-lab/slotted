@@ -277,3 +277,20 @@ test('session rows for a week view are sorted and marked draft or done', () => {
   assert.ok(sessionRows([{ key: 'x', name: 'X', day: 1, start: 1, end: 2 }], { draft: true })[0].draft);
   assert.deepEqual(sessionRows(undefined), []);
 });
+
+import { pinnedPlan } from '../js/scheduler.js';
+test('sessions the athlete moved stay at their times, and the planner places the rest around them', () => {
+  const blocks = [0, 1, 2, 3, 4].map((day) => ({ day, start: '08:45', end: '15:15', type: 'school', label: 'School' }));
+  const base = planWeek(profile(3), blocks, win).sessions;
+  const moving = base[0];
+  const pins = { [moving.key]: { day: 6, start: toMin('10:00'), end: toMin('11:00') } };
+  const { pinned, pinnedKeys } = pinnedPlan(base, pins);
+  assert.equal(pinned.length, 1);
+  assert.deepEqual([pinned[0].day, pinned[0].start, pinned[0].pinned, pinned[0].name], [6, 600, true, moving.name]);
+  const rest = planWeek(profile(3), blocks, win, { keys: base.map((s) => s.key).filter((k) => !pinnedKeys.has(k)), fixed: pinned }).sessions;
+  assert.equal(rest.length, base.length - 1);
+  assert.ok(rest.every((s) => s.day !== 6), 'no other session on the moved session’s day');
+  assert.deepEqual(pinnedPlan(base, {}).pinned, [], 'no pins, nothing moved');
+  assert.deepEqual(pinnedPlan(base, { nope: { day: 1, start: 1, end: 2 } }).pinned, [], 'a pin for a session that isn’t planned is ignored');
+  assert.equal(sessionRows(pinned)[0].moved, true);
+});

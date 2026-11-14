@@ -55,7 +55,7 @@ export function windowLines(days, minLen = 45) {
 
 // Planned sessions as short lines (day, start time, name and the planner's notes), without exercises.
 export function planLines(sessions) {
-  return (sessions || []).slice().sort((a, b) => a.day - b.day).map((s) => `- ${DAYS_SHORT[s.day]} ${fmtTime(s.start)} to ${fmtTime(s.end)} ${s.name}${s.notes && s.notes.length ? ` (${s.notes.join('; ')})` : ''}`);
+  return (sessions || []).slice().sort((a, b) => a.day - b.day).map((s) => `- ${DAYS_SHORT[s.day]} ${fmtTime(s.start)} to ${fmtTime(s.end)} ${s.name}${s.pinned ? ' (moved by the athlete)' : ''}${s.notes && s.notes.length ? ` (${s.notes.join('; ')})` : ''}`);
 }
 
 export const STARTERS = [

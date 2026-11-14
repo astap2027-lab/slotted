@@ -115,3 +115,9 @@ test('a full year of heavy training still fits the server’s size limit', () =>
   const size = Buffer.byteLength(JSON.stringify({ data: forUpload(state), baseUpdatedAt: 1 }));
   assert.ok(size < MAX_BYTES / 2, `${size} bytes: a year should use well under half`);
 });
+
+test('next-week sessions the athlete moved survive a sync', async () => {
+  const { mergeStates } = await import('../js/sync.js');
+  const out = mergeStates({ updatedAt: 3, history: { '2026-11-16': { done: [] } } }, { updatedAt: 1, history: { '2026-11-16': { pins: { upperA: { day: 3, start: 880, end: 940 } } } } });
+  assert.deepEqual(out.history['2026-11-16'].pins, { upperA: { day: 3, start: 880, end: 940 } });
+});
