@@ -55,3 +55,15 @@ export function importJSON(text) {
 export function reset() {
   try { localStorage.removeItem(KEY); } catch { /* ignore */ }
 }
+
+// One copy of what this device had before a sync replaced its routine, timetable or calendars, so it can be put back.
+const SNAP_KEY = `${KEY}:before-sync`;
+export function snapshotSave(state) {
+  try { localStorage.setItem(SNAP_KEY, JSON.stringify({ at: Date.now(), state })); return true; } catch { return false; }
+}
+export function snapshotLoad() {
+  try { const x = JSON.parse(localStorage.getItem(SNAP_KEY) || 'null'); return x && x.state && x.at ? x : null; } catch { return null; }
+}
+export function snapshotClear() {
+  try { localStorage.removeItem(SNAP_KEY); } catch { /* ignore */ }
+}

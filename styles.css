@@ -986,3 +986,7 @@ td .effort-opts { max-width: 300px; }
 .item.gym { box-shadow: inset 3px 0 0 var(--lime); text-decoration: none; color: inherit; }
 a.item.gym:hover { border-color: var(--lime-line); }
 .item.gym .item-edit, .item.gym .item-edit span { text-decoration: none; }
+
+/* ---------- choosing which copy to keep ---------- */
+.sync-ask { flex-direction: column; align-items: stretch; gap: 10px; width: min(460px, calc(100vw - 32px)); padding: 14px 16px; }
+.sync-ask .actions { display: flex; gap: 8px; flex-wrap: wrap; }

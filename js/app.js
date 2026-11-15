@@ -14,8 +14,8 @@ import {
 import { eventsBetween, parseICS, calendarUrl, sessionEvents, buildICS, blockEvents } from './ical.js';
 import { routineFromCopy, askRoutineCopy, ROUTINE_MAX_IMAGES } from './routine-import.js';
 import { proposeChanges, proposeMornings, applyProposal } from './adjust.js';
-import { load, save, exportJSON, importJSON, reset, defaultState } from './store.js';
-import { mergeStates, forUpload } from './sync.js';
+import { load, save, exportJSON, importJSON, reset, defaultState, snapshotSave, snapshotLoad, snapshotClear } from './store.js';
+import { mergeStates, forUpload, syncDecision, hasSetup, setupSig } from './sync.js';
 import { computeFreshness, freshnessLevel, LEVEL_LABELS, musclesFor, MUSCLES, PARTS, EFFORT, MAP_GROUPS } from './freshness.js';
 import { FRONT, BACK } from './anatomy.js';
 import { restSeconds, platesPerSide, warmupSets, usesBarbell, alternatives, weekRecap, PLATES } from './workout.js';
@@ -107,7 +107,7 @@ const MUSCLE_LABEL = Object.fromEntries(MUSCLES.map((m) => [m.id, m.label]));
 const fmtNum = (n) => Math.round(n).toLocaleString('en-AU');
 const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 // The release number. It must match CACHE in sw.js (a test checks); shown at the bottom of Settings.
-const APP_VERSION = 41;
+const APP_VERSION = 42;
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const subnav = (cur) => `<nav class="subnav" aria-label="Training">${[['plan', 'This week'], ['week', 'My week'], ['routine', 'Routine'], ['library', 'Library']]
   .map(([v, t]) => `<a href="#${v}" ${v === cur ? 'aria-current="page"' : ''}>${t}</a>`).join('')}</nav>`;
@@ -4432,6 +4432,8 @@ let pushing = false;
 let lastPull = 0;
 
 function adoptState(next, syncedAt) {
+  // If this replaces the routine, timetable or calendars this device had, keep one copy so it can be put back.
+  if (hasSetup(state) && setupSig(state) !== setupSig(next)) snapshotSave(forUpload(state));
   state = { ...defaultState(), ...next, installDismissed: state.installDismissed, syncedAt };
   save(state);
   loadLibrary();
@@ -4460,17 +4462,47 @@ async function pull() {
   if (res.status === 401) { account = { status: 'signedOut' }; return; }
   if (!res.ok) return;
   const { data, updatedAt } = await res.json();
-  if (!data) { if (state.setupDone) pushNow(); return; }
-  const neverSynced = !state.syncedAt;
-  const localChanged = (state.updatedAt || 0) > (state.syncedAt || 0);
-  if (neverSynced || updatedAt > state.syncedAt) {
-    const fresh = neverSynced && !state.setupDone;
-    adoptState(fresh || !localChanged ? data : mergeStates(state, data), updatedAt);
-    if (!fresh && localChanged) pushNow();
+  pulledOnce = true;
+  applySync(data, updatedAt);
+}
+
+// Carry out what syncDecision() says for the account's copy. Used after a pull and when an upload finds a newer copy.
+let pulledOnce = false; // a device that has never synced doesn't upload until it has heard from the account
+let syncAsk = null; // { data, updatedAt } while waiting for the person to choose which copy to keep
+function applySync(data, updatedAt, retry = true) {
+  if (syncAsk) return 'ask';
+  const d = syncDecision(state, data, updatedAt);
+  if (d.action === 'ask') { syncAsk = { data, updatedAt }; showSyncAsk(); return 'ask'; }
+  if (d.action === 'adopt' || d.action === 'merge') {
+    adoptState(d.state, updatedAt);
+    if (d.first) toast('Signed in. Your account’s routine and timetable are now on this device. Workouts logged here were kept.');
+    if (d.push) pushNow(retry);
     route();
-  } else if (localChanged) {
-    pushNow();
-  }
+  } else if (d.action === 'push') pushNow(retry);
+  return d.action;
+}
+
+// The account's copy has no routine, commitments or calendars, but this device does: ask, never guess.
+function showSyncAsk() {
+  if (document.getElementById('sync-ask')) return;
+  const bar = document.createElement('div');
+  bar.id = 'sync-ask';
+  bar.className = 'update-banner sync-ask';
+  bar.setAttribute('role', 'alertdialog');
+  bar.setAttribute('aria-label', 'Choose which copy to keep');
+  bar.innerHTML = `<span>Your account has no routine or timetable saved, but this device does. Which should Slotted keep?</span>
+    <span class="actions"><button type="button" class="primary" data-keep="local">Keep this device’s</button><button type="button" class="ghost" data-keep="server">Use the account’s</button></span>`;
+  bar.querySelectorAll('[data-keep]').forEach((b) => b.addEventListener('click', () => {
+    const ask = syncAsk;
+    syncAsk = null;
+    bar.remove();
+    if (!ask) return;
+    // Either way, workouts logged on both copies are kept; only whose routine and timetable win differs.
+    adoptState(mergeStates(state, ask.data, { prefer: b.dataset.keep }), ask.updatedAt);
+    if (b.dataset.keep === 'local') { state.updatedAt = Date.now(); save(state); pushNow(); toast('Kept this device’s routine and timetable, and saved them to your account.'); } else toast('Using your account’s copy. You can put this device’s back in Settings.');
+    route();
+  }));
+  document.body.appendChild(bar);
 }
 
 function schedulePush() {
@@ -4482,6 +4514,7 @@ function schedulePush() {
 
 async function pushNow(retry = true) {
   if (account.status !== 'signedIn') return;
+  if (syncAsk || (!state.syncedAt && !pulledOnce)) return; // wait for the choice, or for the first word from the account
   if (pushing) { schedulePush(); return; }
   pushing = true;
   try {
@@ -4497,10 +4530,8 @@ async function pushNow(retry = true) {
       syncStatus = 'saved';
     } else if (res.status === 409 && retry) {
       const theirs = await res.json();
-      adoptState(mergeStates(state, theirs.data), theirs.updatedAt);
       pushing = false;
-      await pushNow(false);
-      route();
+      applySync(theirs.data, theirs.updatedAt, false);
       return;
     } else if (res.status === 401) {
       account = { status: 'signedOut' };
@@ -4695,6 +4726,8 @@ function renderSettings() {
           <button type="button" id="export">Download backup</button>
           <label class="btn" style="cursor:pointer">Restore backup<input id="import" type="file" accept="application/json,.json" hidden></label>
         </div>
+        ${(() => { const snap = snapshotLoad(); return snap ? `<p class="small muted">A sync on ${new Date(snap.at).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' })} replaced this device’s routine or timetable. The copy this device had before is kept here.</p>
+        <div class="actions"><button type="button" id="snap-restore">Put back what this device had</button><button type="button" class="ghost" id="snap-clear">I don’t need it</button></div>` : ''; })()}
         <div class="actions"><button type="button" class="ghost danger" id="reset">Delete everything on this device</button></div>
       </section>
       <p class="muted small app-version">Slotted version ${APP_VERSION}</p>
@@ -4746,6 +4779,18 @@ function renderSettings() {
       toast(er.message || 'That file couldn’t be read.');
     }
   });
+  const snapRestore = document.getElementById('snap-restore');
+  if (snapRestore) snapRestore.addEventListener('click', () => {
+    const snap = snapshotLoad();
+    if (!snap) { renderSettings(); return; }
+    const keep = { syncedAt: state.syncedAt, installDismissed: state.installDismissed };
+    snapshotClear();
+    state = { ...defaultState(), ...snap.state, ...keep };
+    loadLibrary(); rememberExerciseNames(state.exerciseNames); syncRoutine();
+    applyTheme(); commit(); toast('Put back. This copy is now saved to your account too.'); route();
+  });
+  const snapClear = document.getElementById('snap-clear');
+  if (snapClear) snapClear.addEventListener('click', () => { snapshotClear(); renderSettings(); });
   document.getElementById('reset').addEventListener('click', (e) => {
     const box = e.target.parentElement;
     box.innerHTML = `<div class="confirm"><span>This can’t be undone.</span><button type="button" class="danger" id="reset-yes">Yes, delete everything</button><button type="button" id="reset-no">Keep my data</button></div>`;
