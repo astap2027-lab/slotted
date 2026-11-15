@@ -121,3 +121,65 @@ test('next-week sessions the athlete moved survive a sync', async () => {
   const out = mergeStates({ updatedAt: 3, history: { '2026-11-16': { done: [] } } }, { updatedAt: 1, history: { '2026-11-16': { pins: { upperA: { day: 3, start: 880, end: 940 } } } } });
   assert.deepEqual(out.history['2026-11-16'].pins, { upperA: { day: 3, start: 880, end: 940 } });
 });
+
+// ---------- which copy wins ----------
+const full = (over = {}) => ({
+  setupDone: true, updatedAt: 900, syncedAt: 900, // nothing unsaved
+  profile: { sessionsPerWeek: 4 },
+  routine: { mode: 'custom', workouts: [{ id: 'w1', name: 'Chest and back', exercises: [{ id: 'e1', name: 'Bench press', sets: 3, reps: '6–8' }] }] },
+  blocks: { A: [{ id: 'b1', day: 1, start: '16:00', end: '18:00', type: 'sport', label: 'Sailing' }], B: [] },
+  calendars: [{ id: 'c1', name: 'Google', url: 'https://x.test/a.ics' }],
+  history: { '2026-11-09': { done: ['w1'], plan: [{ key: 'w1' }] } },
+  log: { '2026-11-09': { w1: { 'x_bench-press': [{ kg: 60, reps: 8, done: true }] } } },
+  ...over,
+});
+const blankSetup = (over = {}) => ({
+  setupDone: true, updatedAt: 5000,
+  profile: { sessionsPerWeek: 3 }, routine: { mode: 'suggested', workouts: [] }, blocks: { A: [], B: [] },
+  history: { '2026-11-09': { done: [], plan: [{ key: 'fullA' }] } }, log: {}, ...over,
+});
+
+test('a phone set up before signing in takes the account’s routine and timetable, and keeps what it logged', async () => {
+  const { syncDecision, hasSetup } = await import('../js/sync.js');
+  const phone = blankSetup({ log: { '2026-11-09': { fullA: { squat: [{ kg: 40, reps: 8, done: true }] } } } });
+  const d = syncDecision(phone, full(), 2000);
+  assert.equal(d.action, 'merge'); assert.equal(d.first, true); assert.equal(d.push, true);
+  assert.equal(d.state.routine.mode, 'custom', 'the account’s routine wins although the phone’s copy is newer');
+  assert.equal(d.state.blocks.A[0].label, 'Sailing');
+  assert.equal(d.state.calendars.length, 1);
+  assert.equal(d.state.profile.sessionsPerWeek, 4);
+  assert.ok(d.state.log['2026-11-09'].fullA.squat[0].done, 'the phone’s logged set is kept');
+  assert.ok(d.state.log['2026-11-09'].w1['x_bench-press'][0].done, 'and the account’s');
+  assert.equal(hasSetup(d.state), true);
+  // A brand-new phone (setup not done) simply takes the account's copy.
+  assert.equal(syncDecision({ setupDone: false, updatedAt: 1 }, full(), 2000).action, 'adopt');
+});
+
+test('an account copy with no routine or timetable never silently replaces a device that has them', async () => {
+  const { syncDecision, mergeStates } = await import('../js/sync.js');
+  // The laptop is up to date (nothing unsaved); the account now holds the phone's blank upload, with merged history.
+  const blankOnServer = blankSetup({ history: full().history, log: full().log });
+  assert.equal(syncDecision(full(), blankOnServer, 6000).action, 'ask');
+  assert.equal(syncDecision(full({ syncedAt: undefined }), blankOnServer, 6000).action, 'ask', 'also on a first sign-in');
+  // Keeping the device's copy: its routine and timetable, with history from both.
+  const kept = mergeStates(full(), blankOnServer, { prefer: 'local' });
+  assert.equal(kept.routine.mode, 'custom'); assert.equal(kept.blocks.A.length, 1);
+  // Using the account's: blank setup, history kept.
+  const used = mergeStates(full(), blankOnServer, { prefer: 'server' });
+  assert.equal(used.routine.mode, 'suggested'); assert.ok(used.log['2026-11-09'].w1);
+});
+
+test('ordinary syncing is unchanged', async () => {
+  const { syncDecision } = await import('../js/sync.js');
+  const other = full({ updatedAt: 3000, profile: { sessionsPerWeek: 5 } });
+  assert.equal(syncDecision(full(), other, 950).action, 'adopt', 'the account is newer and nothing is unsaved here');
+  assert.equal(syncDecision(full(), other, 950).state.profile.sessionsPerWeek, 5);
+  const changed = full({ updatedAt: 4000, profile: { sessionsPerWeek: 2 } });
+  const d = syncDecision(changed, other, 950);
+  assert.equal(d.action, 'merge'); assert.equal(d.state.profile.sessionsPerWeek, 2, 'the newer edit wins as before');
+  assert.equal(syncDecision(changed, other, 900).action, 'push', 'the account hasn’t changed; just upload');
+  assert.equal(syncDecision(full(), other, 900).action, 'none');
+  assert.equal(syncDecision(full(), null).action, 'push'); assert.equal(syncDecision({ setupDone: false }, null).action, 'none');
+  // Two devices with real setups that differ is a normal merge, not a question.
+  assert.equal(syncDecision(full(), full({ routine: { mode: 'custom', workouts: [{ exercises: [{ name: 'Squat' }] }] } }), 950).action, 'adopt');
+});

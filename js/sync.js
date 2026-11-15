@@ -25,10 +25,12 @@ function mergeSets(newer = [], older = []) {
 
 // Settings come from whichever copy changed most recently; logs, finished sessions and
 // check-ins from both copies are kept.
-export function mergeStates(local, server) {
+// opts.prefer: 'server' or 'local' picks whose settings win regardless of timestamps (a device's first sync
+// takes the account's; a device asked to keep its own takes the device's).
+export function mergeStates(local, server, opts = {}) {
   if (!server) return clone(local);
   if (!local) return clone(server);
-  const localNewer = (local.updatedAt || 0) >= (server.updatedAt || 0);
+  const localNewer = opts.prefer === 'local' ? true : opts.prefer === 'server' ? false : (local.updatedAt || 0) >= (server.updatedAt || 0);
   const newer = localNewer ? local : server;
   const older = localNewer ? server : local;
   const out = clone(newer);
@@ -68,4 +70,36 @@ export function mergeStates(local, server) {
   out.customExercises = [...mine.values()].map(clone);
   out.updatedAt = Math.max(local.updatedAt || 0, server.updatedAt || 0);
   return out;
+}
+
+// Whether a copy holds a set-up week: its own routine, commitments, or connected calendars.
+export const hasSetup = (st) => !!st && (
+  !!(st.routine && st.routine.mode === 'custom' && (st.routine.workouts || []).some((w) => (w.exercises || []).some((e) => e && e.name)))
+  || Object.values(st.blocks || {}).some((l) => (l || []).length > 0)
+  || (st.calendars || []).length > 0);
+
+// The parts of a copy that a sync could replace: routine, commitments and calendars.
+export const setupSig = (st) => JSON.stringify([st && st.routine, st && st.blocks, st && st.calendars, st && st.calendarRules]);
+
+/**
+ * What to do when this device hears from the account. Pure: the app carries it out.
+ * @param local   this device's state (with syncedAt, updatedAt, setupDone)
+ * @param server  the account's copy, or null when the account has none yet
+ * @param serverUpdatedAt  when the account's copy was saved
+ * @returns { action: 'none' | 'push' | 'adopt' | 'merge' | 'ask', state?, push?, first? }
+ *   ask: the account's copy has no routine, commitments or calendars but this device does. Never decided silently.
+ */
+export function syncDecision(local, server, serverUpdatedAt = 0) {
+  if (!server) return { action: local.setupDone ? 'push' : 'none' };
+  const neverSynced = !local.syncedAt;
+  const localChanged = (local.updatedAt || 0) > (local.syncedAt || 0);
+  const serverNewer = neverSynced || serverUpdatedAt > local.syncedAt;
+  if (!serverNewer) return { action: localChanged ? 'push' : 'none' };
+  if (hasSetup(local) && !hasSetup(server)) return { action: 'ask' };
+  // A brand-new device takes the account's copy as it is.
+  if (neverSynced && !local.setupDone) return { action: 'adopt', state: clone(server) };
+  // A device that was set up before signing in: the account's settings win; workouts logged here are kept.
+  if (neverSynced) return { action: 'merge', state: mergeStates(local, server, { prefer: 'server' }), push: true, first: true };
+  if (!localChanged) return { action: 'adopt', state: clone(server) };
+  return { action: 'merge', state: mergeStates(local, server), push: true };
 }

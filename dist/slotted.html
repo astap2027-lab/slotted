@@ -994,6 +994,10 @@ td .effort-opts { max-width: 300px; }
 a.item.gym:hover { border-color: var(--lime-line); }
 .item.gym .item-edit, .item.gym .item-edit span { text-decoration: none; }
 
+/* ---------- choosing which copy to keep ---------- */
+.sync-ask { flex-direction: column; align-items: stretch; gap: 10px; width: min(460px, calc(100vw - 32px)); padding: 14px 16px; }
+.sync-ask .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
 </style>
 <div class="shell">
     <aside class="sidebar" aria-label="Slotted">
@@ -4749,6 +4753,18 @@ function reset() {
   try { localStorage.removeItem(KEY); } catch { /* ignore */ }
 }
 
+// One copy of what this device had before a sync replaced its routine, timetable or calendars, so it can be put back.
+const SNAP_KEY = `${KEY}:before-sync`;
+function snapshotSave(state) {
+  try { localStorage.setItem(SNAP_KEY, JSON.stringify({ at: Date.now(), state })); return true; } catch { return false; }
+}
+function snapshotLoad() {
+  try { const x = JSON.parse(localStorage.getItem(SNAP_KEY) || 'null'); return x && x.state && x.at ? x : null; } catch { return null; }
+}
+function snapshotClear() {
+  try { localStorage.removeItem(SNAP_KEY); } catch { /* ignore */ }
+}
+
 // ---- js/sync.js ----
 // Syncing between devices. The server keeps one copy per account; when two devices both changed
 // things, the copies are merged so no logged set or completed session is lost.
@@ -4777,10 +4793,12 @@ function mergeSets(newer = [], older = []) {
 
 // Settings come from whichever copy changed most recently; logs, finished sessions and
 // check-ins from both copies are kept.
-function mergeStates(local, server) {
+// opts.prefer: 'server' or 'local' picks whose settings win regardless of timestamps (a device's first sync
+// takes the account's; a device asked to keep its own takes the device's).
+function mergeStates(local, server, opts = {}) {
   if (!server) return clone(local);
   if (!local) return clone(server);
-  const localNewer = (local.updatedAt || 0) >= (server.updatedAt || 0);
+  const localNewer = opts.prefer === 'local' ? true : opts.prefer === 'server' ? false : (local.updatedAt || 0) >= (server.updatedAt || 0);
   const newer = localNewer ? local : server;
   const older = localNewer ? server : local;
   const out = clone(newer);
@@ -4820,6 +4838,38 @@ function mergeStates(local, server) {
   out.customExercises = [...mine.values()].map(clone);
   out.updatedAt = Math.max(local.updatedAt || 0, server.updatedAt || 0);
   return out;
+}
+
+// Whether a copy holds a set-up week: its own routine, commitments, or connected calendars.
+const hasSetup = (st) => !!st && (
+  !!(st.routine && st.routine.mode === 'custom' && (st.routine.workouts || []).some((w) => (w.exercises || []).some((e) => e && e.name)))
+  || Object.values(st.blocks || {}).some((l) => (l || []).length > 0)
+  || (st.calendars || []).length > 0);
+
+// The parts of a copy that a sync could replace: routine, commitments and calendars.
+const setupSig = (st) => JSON.stringify([st && st.routine, st && st.blocks, st && st.calendars, st && st.calendarRules]);
+
+/**
+ * What to do when this device hears from the account. Pure: the app carries it out.
+ * @param local   this device's state (with syncedAt, updatedAt, setupDone)
+ * @param server  the account's copy, or null when the account has none yet
+ * @param serverUpdatedAt  when the account's copy was saved
+ * @returns { action: 'none' | 'push' | 'adopt' | 'merge' | 'ask', state?, push?, first? }
+ *   ask: the account's copy has no routine, commitments or calendars but this device does. Never decided silently.
+ */
+function syncDecision(local, server, serverUpdatedAt = 0) {
+  if (!server) return { action: local.setupDone ? 'push' : 'none' };
+  const neverSynced = !local.syncedAt;
+  const localChanged = (local.updatedAt || 0) > (local.syncedAt || 0);
+  const serverNewer = neverSynced || serverUpdatedAt > local.syncedAt;
+  if (!serverNewer) return { action: localChanged ? 'push' : 'none' };
+  if (hasSetup(local) && !hasSetup(server)) return { action: 'ask' };
+  // A brand-new device takes the account's copy as it is.
+  if (neverSynced && !local.setupDone) return { action: 'adopt', state: clone(server) };
+  // A device that was set up before signing in: the account's settings win; workouts logged here are kept.
+  if (neverSynced) return { action: 'merge', state: mergeStates(local, server, { prefer: 'server' }), push: true, first: true };
+  if (!localChanged) return { action: 'adopt', state: clone(server) };
+  return { action: 'merge', state: mergeStates(local, server), push: true };
 }
 
 // ---- js/app.js ----
@@ -4897,7 +4947,7 @@ const MUSCLE_LABEL = Object.fromEntries(MUSCLES.map((m) => [m.id, m.label]));
 const fmtNum = (n) => Math.round(n).toLocaleString('en-AU');
 const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 // The release number. It must match CACHE in sw.js (a test checks); shown at the bottom of Settings.
-const APP_VERSION = 41;
+const APP_VERSION = 42;
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const subnav = (cur) => `<nav class="subnav" aria-label="Training">${[['plan', 'This week'], ['week', 'My week'], ['routine', 'Routine'], ['library', 'Library']]
   .map(([v, t]) => `<a href="#${v}" ${v === cur ? 'aria-current="page"' : ''}>${t}</a>`).join('')}</nav>`;
@@ -9222,6 +9272,8 @@ let pushing = false;
 let lastPull = 0;
 
 function adoptState(next, syncedAt) {
+  // If this replaces the routine, timetable or calendars this device had, keep one copy so it can be put back.
+  if (hasSetup(state) && setupSig(state) !== setupSig(next)) snapshotSave(forUpload(state));
   state = { ...defaultState(), ...next, installDismissed: state.installDismissed, syncedAt };
   save(state);
   loadLibrary();
@@ -9250,17 +9302,47 @@ async function pull() {
   if (res.status === 401) { account = { status: 'signedOut' }; return; }
   if (!res.ok) return;
   const { data, updatedAt } = await res.json();
-  if (!data) { if (state.setupDone) pushNow(); return; }
-  const neverSynced = !state.syncedAt;
-  const localChanged = (state.updatedAt || 0) > (state.syncedAt || 0);
-  if (neverSynced || updatedAt > state.syncedAt) {
-    const fresh = neverSynced && !state.setupDone;
-    adoptState(fresh || !localChanged ? data : mergeStates(state, data), updatedAt);
-    if (!fresh && localChanged) pushNow();
+  pulledOnce = true;
+  applySync(data, updatedAt);
+}
+
+// Carry out what syncDecision() says for the account's copy. Used after a pull and when an upload finds a newer copy.
+let pulledOnce = false; // a device that has never synced doesn't upload until it has heard from the account
+let syncAsk = null; // { data, updatedAt } while waiting for the person to choose which copy to keep
+function applySync(data, updatedAt, retry = true) {
+  if (syncAsk) return 'ask';
+  const d = syncDecision(state, data, updatedAt);
+  if (d.action === 'ask') { syncAsk = { data, updatedAt }; showSyncAsk(); return 'ask'; }
+  if (d.action === 'adopt' || d.action === 'merge') {
+    adoptState(d.state, updatedAt);
+    if (d.first) toast('Signed in. Your account’s routine and timetable are now on this device. Workouts logged here were kept.');
+    if (d.push) pushNow(retry);
     route();
-  } else if (localChanged) {
-    pushNow();
-  }
+  } else if (d.action === 'push') pushNow(retry);
+  return d.action;
+}
+
+// The account's copy has no routine, commitments or calendars, but this device does: ask, never guess.
+function showSyncAsk() {
+  if (document.getElementById('sync-ask')) return;
+  const bar = document.createElement('div');
+  bar.id = 'sync-ask';
+  bar.className = 'update-banner sync-ask';
+  bar.setAttribute('role', 'alertdialog');
+  bar.setAttribute('aria-label', 'Choose which copy to keep');
+  bar.innerHTML = `<span>Your account has no routine or timetable saved, but this device does. Which should Slotted keep?</span>
+    <span class="actions"><button type="button" class="primary" data-keep="local">Keep this device’s</button><button type="button" class="ghost" data-keep="server">Use the account’s</button></span>`;
+  bar.querySelectorAll('[data-keep]').forEach((b) => b.addEventListener('click', () => {
+    const ask = syncAsk;
+    syncAsk = null;
+    bar.remove();
+    if (!ask) return;
+    // Either way, workouts logged on both copies are kept; only whose routine and timetable win differs.
+    adoptState(mergeStates(state, ask.data, { prefer: b.dataset.keep }), ask.updatedAt);
+    if (b.dataset.keep === 'local') { state.updatedAt = Date.now(); save(state); pushNow(); toast('Kept this device’s routine and timetable, and saved them to your account.'); } else toast('Using your account’s copy. You can put this device’s back in Settings.');
+    route();
+  }));
+  document.body.appendChild(bar);
 }
 
 function schedulePush() {
@@ -9272,6 +9354,7 @@ function schedulePush() {
 
 async function pushNow(retry = true) {
   if (account.status !== 'signedIn') return;
+  if (syncAsk || (!state.syncedAt && !pulledOnce)) return; // wait for the choice, or for the first word from the account
   if (pushing) { schedulePush(); return; }
   pushing = true;
   try {
@@ -9287,10 +9370,8 @@ async function pushNow(retry = true) {
       syncStatus = 'saved';
     } else if (res.status === 409 && retry) {
       const theirs = await res.json();
-      adoptState(mergeStates(state, theirs.data), theirs.updatedAt);
       pushing = false;
-      await pushNow(false);
-      route();
+      applySync(theirs.data, theirs.updatedAt, false);
       return;
     } else if (res.status === 401) {
       account = { status: 'signedOut' };
@@ -9485,6 +9566,8 @@ function renderSettings() {
           <button type="button" id="export">Download backup</button>
           <label class="btn" style="cursor:pointer">Restore backup<input id="import" type="file" accept="application/json,.json" hidden></label>
         </div>
+        ${(() => { const snap = snapshotLoad(); return snap ? `<p class="small muted">A sync on ${new Date(snap.at).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' })} replaced this device’s routine or timetable. The copy this device had before is kept here.</p>
+        <div class="actions"><button type="button" id="snap-restore">Put back what this device had</button><button type="button" class="ghost" id="snap-clear">I don’t need it</button></div>` : ''; })()}
         <div class="actions"><button type="button" class="ghost danger" id="reset">Delete everything on this device</button></div>
       </section>
       <p class="muted small app-version">Slotted version ${APP_VERSION}</p>
@@ -9536,6 +9619,18 @@ function renderSettings() {
       toast(er.message || 'That file couldn’t be read.');
     }
   });
+  const snapRestore = document.getElementById('snap-restore');
+  if (snapRestore) snapRestore.addEventListener('click', () => {
+    const snap = snapshotLoad();
+    if (!snap) { renderSettings(); return; }
+    const keep = { syncedAt: state.syncedAt, installDismissed: state.installDismissed };
+    snapshotClear();
+    state = { ...defaultState(), ...snap.state, ...keep };
+    loadLibrary(); rememberExerciseNames(state.exerciseNames); syncRoutine();
+    applyTheme(); commit(); toast('Put back. This copy is now saved to your account too.'); route();
+  });
+  const snapClear = document.getElementById('snap-clear');
+  if (snapClear) snapClear.addEventListener('click', () => { snapshotClear(); renderSettings(); });
   document.getElementById('reset').addEventListener('click', (e) => {
     const box = e.target.parentElement;
     box.innerHTML = `<div class="confirm"><span>This can’t be undone.</span><button type="button" class="danger" id="reset-yes">Yes, delete everything</button><button type="button" id="reset-no">Keep my data</button></div>`;
