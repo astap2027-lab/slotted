@@ -2,6 +2,7 @@
 // its own calendar ("Slotted") and add, change and delete events in it, and nothing else in their Google account.
 // Tokens are encrypted with TOKEN_KEY before they're stored (table google_calendar).
 import { encrypt, decrypt } from './lib.js';
+import { isGymEvent } from '../js/ical.js';
 
 export const GCAL_SCOPE = 'https://www.googleapis.com/auth/calendar.app.created';
 const API = 'https://www.googleapis.com/calendar/v3';
@@ -63,23 +64,27 @@ export async function ensureCalendar(env, userId, conn, timeZone) {
   return cal.id;
 }
 
-const eventBody = (e) => ({
+// Gym sessions get a popup reminder `reminderMin` minutes before (0 = none); commitments never do.
+const remindersFor = (e, reminderMin) => (reminderMin > 0 && isGymEvent(e) ? { useDefault: false, overrides: [{ method: 'popup', minutes: reminderMin }] } : { useDefault: false });
+const eventBody = (e, reminderMin = 0) => ({
   summary: e.title,
   description: `${e.notes ? `${e.notes}\n\n` : ''}${GCAL_MARK}`,
   start: { dateTime: e.start },
   end: { dateTime: e.end },
   transparency: 'opaque',
   extendedProperties: { private: { slotted: '1', slottedId: e.uid } },
-  reminders: { useDefault: false },
+  reminders: remindersFor(e, reminderMin),
 });
-const same = (g, e) => g.summary === e.title && Date.parse(g.start && g.start.dateTime) === Date.parse(e.start)
-  && Date.parse(g.end && g.end.dateTime) === Date.parse(e.end) && (g.description || '') === eventBody(e).description;
+const reminderOn = (r) => ((r && r.overrides && r.overrides[0] && r.overrides[0].minutes) || 0);
+const same = (g, e, reminderMin) => g.summary === e.title && Date.parse(g.start && g.start.dateTime) === Date.parse(e.start)
+  && Date.parse(g.end && g.end.dateTime) === Date.parse(e.end) && (g.description || '') === eventBody(e).description
+  && reminderOn(g.reminders) === reminderOn(remindersFor(e, reminderMin));
 
 /**
  * Make Slotted's calendar match `events` between `from` and `to` (ISO): add what's missing, update what changed,
  * delete Slotted events in that window that are no longer wanted. Events outside the window are left alone.
  */
-export async function syncEvents(conn, calendarId, events, from, to) {
+export async function syncEvents(conn, calendarId, events, from, to, reminderMin = 0) {
   const have = new Map();
   let pageToken = '';
   for (let i = 0; i < 10; i++) {
@@ -97,7 +102,7 @@ export async function syncEvents(conn, calendarId, events, from, to) {
   for (const e of events) {
     const g = have.get(e.uid);
     have.delete(e.uid);
-    if (!g) { await gapi(conn.token, cal, { method: 'POST', body: eventBody(e) }); counts.added++; } else if (!same(g, e)) { await gapi(conn.token, `${cal}/${g.id}`, { method: 'PATCH', body: eventBody(e) }); counts.updated++; }
+    if (!g) { await gapi(conn.token, cal, { method: 'POST', body: eventBody(e, reminderMin) }); counts.added++; } else if (!same(g, e, reminderMin)) { await gapi(conn.token, `${cal}/${g.id}`, { method: 'PATCH', body: eventBody(e, reminderMin) }); counts.updated++; }
   }
   for (const g of have.values()) { await gapi(conn.token, `${cal}/${g.id}`, { method: 'DELETE' }); counts.removed++; }
   return counts;

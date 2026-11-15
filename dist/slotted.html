@@ -3395,7 +3395,14 @@ function icsFold(line) {
 }
 
 // A whole calendar file from events ({ uid, title, start, end (ISO), notes }).
-function buildICS(events, { name = 'Slotted gym sessions', stamp = Date.now() } = {}) {
+// Minutes before a gym session to remind: 0 (off), 15, 30 or 60. Anything else reads as 30.
+const REMINDER_CHOICES = [0, 15, 30, 60];
+const reminderMinutes = (v) => (REMINDER_CHOICES.includes(Number(v)) && v !== '' && v !== null && v !== undefined ? Number(v) : 30);
+// Gym sessions (not commitments) are the events that get a reminder.
+const isGymEvent = (e) => /^Gym: /.test((e && e.title) || '');
+
+function buildICS(events, { name = 'Slotted gym sessions', stamp = Date.now(), reminderMin = 0 } = {}) {
+  const alarm = reminderMin > 0 ? ['BEGIN:VALARM', 'ACTION:DISPLAY', 'DESCRIPTION:Gym session', `TRIGGER:-PT${reminderMin}M`, 'END:VALARM'] : [];
   const lines = [
     'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Slotted//Gym sessions//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
     `X-WR-CALNAME:${icsEscape(name)}`, 'REFRESH-INTERVAL;VALUE=DURATION:PT1H', 'X-PUBLISHED-TTL:PT1H',
@@ -3403,7 +3410,7 @@ function buildICS(events, { name = 'Slotted gym sessions', stamp = Date.now() } 
   for (const e of events || []) {
     if (!e || !e.uid || !e.start || !e.end || Number.isNaN(Date.parse(e.start)) || Number.isNaN(Date.parse(e.end))) continue;
     lines.push('BEGIN:VEVENT', `UID:${icsEscape(e.uid)}`, `DTSTAMP:${icsTime(stamp)}`, `DTSTART:${icsTime(e.start)}`, `DTEND:${icsTime(e.end)}`,
-      `SUMMARY:${icsEscape(e.title)}`, ...(e.notes ? [`DESCRIPTION:${icsEscape(e.notes)}`] : []), 'TRANSP:OPAQUE', 'END:VEVENT');
+      `SUMMARY:${icsEscape(e.title)}`, ...(e.notes ? [`DESCRIPTION:${icsEscape(e.notes)}`] : []), 'TRANSP:OPAQUE', ...(isGymEvent(e) ? alarm : []), 'END:VEVENT');
   }
   lines.push('END:VCALENDAR');
   return `${lines.map(icsFold).join('\r\n')}\r\n`;
@@ -4947,7 +4954,7 @@ const MUSCLE_LABEL = Object.fromEntries(MUSCLES.map((m) => [m.id, m.label]));
 const fmtNum = (n) => Math.round(n).toLocaleString('en-AU');
 const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 // The release number. It must match CACHE in sw.js (a test checks); shown at the bottom of Settings.
-const APP_VERSION = 42;
+const APP_VERSION = 43;
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const subnav = (cur) => `<nav class="subnav" aria-label="Training">${[['plan', 'This week'], ['week', 'My week'], ['routine', 'Routine'], ['library', 'Library']]
   .map(([v, t]) => `<a href="#${v}" ${v === cur ? 'aria-current="page"' : ''}>${t}</a>`).join('')}</nav>`;
@@ -6290,7 +6297,7 @@ function exportWeeks() {
 // Keeps state.calendarExport up to date when the calendar link is on; returns the state for uploading.
 function refreshExport() {
   if (state.calendarFeed) {
-    try { state.calendarExport = { at: Date.now(), events: sessionEvents(exportWeeks()) }; } catch { /* keep the last good copy */ }
+    try { state.calendarExport = { at: Date.now(), events: sessionEvents(exportWeeks()), reminderMin: reminderMinutes(state.reminderMin) }; } catch { /* keep the last good copy */ }
   }
   return state;
 }
@@ -6319,7 +6326,8 @@ async function gcalSync({ force = false } = {}) {
   if (!gcalOn() || gcalStatus.busy) return;
   let events;
   try { events = gcalEvents(); } catch { return; }
-  const sig = JSON.stringify(events);
+  const reminderMin = reminderMinutes(state.reminderMin);
+  const sig = JSON.stringify([reminderMin, events]);
   if (!force && sig === gcalSig) return;
   gcalStatus = { ...gcalStatus, busy: true };
   const from = keyToDate(currentWeek()).toISOString();
@@ -6327,7 +6335,7 @@ async function gcalSync({ force = false } = {}) {
   try {
     const res = await fetch('/api/calendar/google/sync', {
       method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ events, from, to, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }),
+      body: JSON.stringify({ events, from, to, reminderMin, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }),
     });
     const data = await res.json().catch(() => ({}));
     if (res.ok) { gcalSig = sig; gcalStatus = { busy: false, at: Date.now(), error: '', counts: data }; } else {
@@ -6370,6 +6378,19 @@ function wireGcal() {
     renderSettings();
     toast('Google Calendar disconnected. The Slotted calendar stays in Google; delete it there if you like.');
   });
+}
+
+// Reminders come from the calendar app (Google, Apple, Outlook), set on each gym session Slotted adds. No AI involved.
+function reminderPanel() {
+  if (!gcalOn() && !state.calendarFeed) return '';
+  const cur = reminderMinutes(state.reminderMin);
+  return `<div class="feed stack">
+    <h3>Remind me before gym sessions</h3>
+    <div class="seg" role="group" aria-label="Reminder before gym sessions">
+      ${REMINDER_CHOICES.map((m) => `<button type="button" data-remind="${m}" aria-pressed="${cur === m}">${m ? `${m} min` : 'Off'}</button>`).join('')}
+    </div>
+    <p class="muted small">Your calendar app sends the reminder, so keep its notifications on for the Slotted calendar.</p>
+  </div>`;
 }
 
 function feedPanel() {
@@ -6422,7 +6443,7 @@ function wireFeed() {
   });
   const file = document.getElementById('feed-file');
   if (file) file.addEventListener('click', () => {
-    const text = buildICS(sessionEvents(exportWeeks()));
+    const text = buildICS(sessionEvents(exportWeeks()), { reminderMin: reminderMinutes(state.reminderMin) });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([text], { type: 'text/calendar' }));
     a.download = 'slotted-sessions.ics';
@@ -6464,12 +6485,18 @@ function calendarsPanel() {
       <p class="small muted">Pick <i>School timetable</i> for a school app: its classes become one School block a day (study periods don’t count), replacing your typed-in school times on those days.</p>
     </details>
     <p class="muted small">A calendar link works like a password: anyone with it can see that calendar. It’s saved with your Slotted data, and event names are shared with the coach when you ask it something. Remove it here any time.</p>
+    ${reminderPanel()}
     ${gcalPanel()}
     ${feedPanel()}
   </section>`;
 }
 
 function wireCalendars() {
+  app.querySelectorAll('[data-remind]').forEach((b) => b.addEventListener('click', () => {
+    state.reminderMin = Number(b.dataset.remind);
+    commit(); renderSettings();
+    toast(state.reminderMin ? `Reminder ${state.reminderMin} minutes before each gym session` : 'Reminders off');
+  }));
   wireFeed();
   wireGcal();
   const form = document.getElementById('cal-add');

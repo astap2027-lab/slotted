@@ -2,6 +2,7 @@
 // match the events the app worked out (gym sessions and the commitments they added in Slotted).
 import { json, currentUser, sameOrigin } from '../../../../server/lib.js';
 import { connection, ensureCalendar, syncEvents } from '../../../../server/gcal.js';
+import { reminderMinutes } from '../../../../js/ical.js';
 
 const ISO = (v) => typeof v === 'string' && !Number.isNaN(Date.parse(v));
 
@@ -22,7 +23,7 @@ export async function onRequestPost({ request, env }) {
   if (!conn) return json({ error: 'not_connected' }, 404);
   try {
     const calendarId = await ensureCalendar(env, user.id, conn, String(body.timeZone || '').slice(0, 60));
-    const counts = await syncEvents(conn, calendarId, cleanEvents(body.events), new Date(body.from).toISOString(), new Date(body.to).toISOString());
+    const counts = await syncEvents(conn, calendarId, cleanEvents(body.events), new Date(body.from).toISOString(), new Date(body.to).toISOString(), reminderMinutes(body.reminderMin));
     return json({ ok: true, ...counts, at: Date.now() });
   } catch (e) {
     if (e.status === 401 || e.status === 403) return json({ error: 'reconnect' }, 401);
