@@ -85,3 +85,37 @@ test('the sync endpoint refuses other sites, signed-out people and bad windows',
   assert.equal((await syncPost({ request: req({}, { Origin: 'https://evil.example' }), env })).status, 403);
   assert.equal((await syncPost({ request: req({ from: '2026-11-16T00:00:00Z', to: '2026-11-30T00:00:00Z' }), env })).status, 401);
 });
+
+// ---------- reminders ----------
+import { buildICS, reminderMinutes } from '../js/ical.js';
+
+test('reminder choices: 0, 15, 30 or 60 minutes; anything else reads as 30', () => {
+  assert.deepEqual([0, 15, 30, 60, undefined, '', 45, 'x'].map(reminderMinutes), [0, 15, 30, 60, 30, 30, 30, 30]);
+});
+
+test('Google: gym sessions get a popup reminder, commitments never; changing the setting updates once', async () => {
+  const gym = sessionEvents([{ key: '2026-11-16', sessions: [{ key: 'legs', name: 'Legs', day: 0, start: 420, end: 480, exercises: [] }] }], { tz: TZ });
+  const sail = blockEvents([{ key: '2026-11-16', blocks: [{ id: 's', day: 1, start: '16:00', end: '18:00', label: 'Sailing', type: 'sport' }] }], { tz: TZ });
+  const g = fakeGoogle();
+  const run = (min) => syncEvents({ token: 't' }, 'cal1', [...gym, ...sail], '2026-11-15T13:00:00Z', '2026-11-29T13:00:00Z', min);
+  assert.deepEqual(await run(30), { added: 2, updated: 0, removed: 0 });
+  const byTitle = (t) => [...g.events.values()].find((e) => e.summary === t);
+  assert.deepEqual(byTitle('Gym: Legs').reminders, { useDefault: false, overrides: [{ method: 'popup', minutes: 30 }] });
+  assert.deepEqual(byTitle('Sailing').reminders, { useDefault: false });
+  assert.deepEqual(await run(30), { added: 0, updated: 0, removed: 0 }, 'nothing changed, nothing sent');
+  assert.deepEqual(await run(60), { added: 0, updated: 1, removed: 0 }, 'only the gym session is updated');
+  assert.equal(byTitle('Gym: Legs').reminders.overrides[0].minutes, 60);
+  assert.deepEqual(await run(0), { added: 0, updated: 1, removed: 0 });
+  assert.deepEqual(byTitle('Gym: Legs').reminders, { useDefault: false });
+});
+
+test('calendar file: an alarm on gym sessions only, and it still reads back', () => {
+  const gym = sessionEvents([{ key: '2026-11-16', sessions: [{ key: 'legs', name: 'Legs', day: 0, start: 420, end: 480, exercises: [] }] }], { tz: TZ });
+  const other = [{ uid: 'x@slotted', title: 'Sailing', start: '2026-11-17T05:00:00.000Z', end: '2026-11-17T07:00:00.000Z' }];
+  const text = buildICS([...gym, ...other], { reminderMin: 30 });
+  assert.equal((text.match(/BEGIN:VALARM/g) || []).length, 1);
+  assert.match(text, /TRIGGER:-PT30M/);
+  assert.doesNotMatch(buildICS(gym, { reminderMin: 0 }), /VALARM/);
+  const from = fromZone({ y: 2026, mo: 11, d: 16, h: 0, mi: 0 }, TZ);
+  assert.deepEqual(eventsBetween(text, from, from + 7 * 86400000, { tz: TZ }).map((e) => e.title), ['Gym: Legs', 'Sailing']);
+});

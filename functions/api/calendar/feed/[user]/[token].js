@@ -2,7 +2,7 @@
 // A calendar of this person's planned gym sessions, for Google, Apple or Outlook to subscribe to. The sessions are
 // worked out by the app (state.calendarExport) and saved with their synced data; this only writes them out.
 // The token is random and lives in their data (state.calendarFeed); a new link or turning it off stops the old one.
-import { buildICS } from '../../../../../js/ical.js';
+import { buildICS, reminderMinutes } from '../../../../../js/ical.js';
 
 const notFound = () => new Response('Not found', { status: 404, headers: { 'cache-control': 'no-store' } });
 
@@ -25,7 +25,7 @@ export async function onRequestGet({ params, env }) {
   try { data = JSON.parse(row.data); } catch { return notFound(); }
   if (!data || !data.calendarFeed || !same(data.calendarFeed.token, token)) return notFound();
   const exp = data.calendarExport || {};
-  return new Response(buildICS(exp.events || [], { stamp: exp.at || Date.now() }), {
+  return new Response(buildICS(exp.events || [], { stamp: exp.at || Date.now(), reminderMin: reminderMinutes(exp.reminderMin) }), {
     headers: { 'content-type': 'text/calendar; charset=utf-8', 'cache-control': 'private, max-age=300', 'content-disposition': 'inline; filename="slotted.ics"' },
   });
 }

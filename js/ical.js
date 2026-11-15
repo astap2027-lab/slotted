@@ -283,7 +283,14 @@ function icsFold(line) {
 }
 
 // A whole calendar file from events ({ uid, title, start, end (ISO), notes }).
-export function buildICS(events, { name = 'Slotted gym sessions', stamp = Date.now() } = {}) {
+// Minutes before a gym session to remind: 0 (off), 15, 30 or 60. Anything else reads as 30.
+export const REMINDER_CHOICES = [0, 15, 30, 60];
+export const reminderMinutes = (v) => (REMINDER_CHOICES.includes(Number(v)) && v !== '' && v !== null && v !== undefined ? Number(v) : 30);
+// Gym sessions (not commitments) are the events that get a reminder.
+export const isGymEvent = (e) => /^Gym: /.test((e && e.title) || '');
+
+export function buildICS(events, { name = 'Slotted gym sessions', stamp = Date.now(), reminderMin = 0 } = {}) {
+  const alarm = reminderMin > 0 ? ['BEGIN:VALARM', 'ACTION:DISPLAY', 'DESCRIPTION:Gym session', `TRIGGER:-PT${reminderMin}M`, 'END:VALARM'] : [];
   const lines = [
     'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Slotted//Gym sessions//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
     `X-WR-CALNAME:${icsEscape(name)}`, 'REFRESH-INTERVAL;VALUE=DURATION:PT1H', 'X-PUBLISHED-TTL:PT1H',
@@ -291,7 +298,7 @@ export function buildICS(events, { name = 'Slotted gym sessions', stamp = Date.n
   for (const e of events || []) {
     if (!e || !e.uid || !e.start || !e.end || Number.isNaN(Date.parse(e.start)) || Number.isNaN(Date.parse(e.end))) continue;
     lines.push('BEGIN:VEVENT', `UID:${icsEscape(e.uid)}`, `DTSTAMP:${icsTime(stamp)}`, `DTSTART:${icsTime(e.start)}`, `DTEND:${icsTime(e.end)}`,
-      `SUMMARY:${icsEscape(e.title)}`, ...(e.notes ? [`DESCRIPTION:${icsEscape(e.notes)}`] : []), 'TRANSP:OPAQUE', 'END:VEVENT');
+      `SUMMARY:${icsEscape(e.title)}`, ...(e.notes ? [`DESCRIPTION:${icsEscape(e.notes)}`] : []), 'TRANSP:OPAQUE', ...(isGymEvent(e) ? alarm : []), 'END:VEVENT');
   }
   lines.push('END:VCALENDAR');
   return `${lines.map(icsFold).join('\r\n')}\r\n`;
