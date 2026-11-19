@@ -1,6 +1,6 @@
 // GET /api/auth/google/callback: Google sends the person back here after they sign in.
 import {
-  redirect, parseCookies, clearCookie, siteOrigin, decodeJwtPayload, createSession,
+  redirect, parseCookies, clearCookie, siteOrigin, decodeJwtPayload, createSession, APP_COOKIE, isAppHash,
 } from '../../../../server/lib.js';
 
 const fail = (why) => redirect(`/?signin=${why}#profile`, [clearCookie('slotted_oauth')]);
@@ -42,5 +42,7 @@ export async function onRequestGet({ request, env }) {
       .bind(user.id, claims.sub, claims.email || null, claims.name || null, Math.floor(Date.now() / 1000)).run();
   }
   const session = await createSession(env, user.id);
+  // Signing in for the iPhone home-screen app: ask the person to confirm before the app gets a session.
+  if (isAppHash(parseCookies(request)[APP_COOKIE])) return redirect('/api/auth/app', [session, clearCookie('slotted_oauth')]);
   return redirect('/?signin=ok#profile', [session, clearCookie('slotted_oauth')]);
 }
