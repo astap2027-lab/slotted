@@ -998,6 +998,12 @@ a.item.gym:hover { border-color: var(--lime-line); }
 .sync-ask { flex-direction: column; align-items: stretch; gap: 10px; width: min(460px, calc(100vw - 32px)); padding: 14px 16px; }
 .sync-ask .actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
+/* ---------- signing in from the welcome screen ---------- */
+.welcome-signin { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 18px; }
+.welcome-signin p { margin: 0; }
+.welcome-tip { margin-top: 10px; }
+.welcome-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+
 </style>
 <div class="shell">
     <aside class="sidebar" aria-label="Slotted">
@@ -4954,7 +4960,7 @@ const MUSCLE_LABEL = Object.fromEntries(MUSCLES.map((m) => [m.id, m.label]));
 const fmtNum = (n) => Math.round(n).toLocaleString('en-AU');
 const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 // The release number. It must match CACHE in sw.js (a test checks); shown at the bottom of Settings.
-const APP_VERSION = 43;
+const APP_VERSION = 44;
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const subnav = (cur) => `<nav class="subnav" aria-label="Training">${[['plan', 'This week'], ['week', 'My week'], ['routine', 'Routine'], ['library', 'Library']]
   .map(([v, t]) => `<a href="#${v}" ${v === cur ? 'aria-current="page"' : ''}>${t}</a>`).join('')}</nav>`;
@@ -5139,6 +5145,17 @@ function welcomeBoard() {
     </div></div>`).join('')}</div>`;
 }
 
+// The welcome screen's account line: sign in to an existing account, or say who's signed in when the account is new.
+function welcomeAccount() {
+  if (account.status === 'signedOut') {
+    return `<div class="welcome-signin"><p class="small muted">Already use Slotted on another device?</p><a class="btn" href="/api/auth/google/start">Sign in with Google</a></div>`;
+  }
+  if (account.status === 'signedIn' && account.user) {
+    return `<p class="small muted welcome-signin">Signed in as ${esc(account.user.name || account.user.email || 'you')}. Your account has nothing saved yet, so answer a few questions to set up. Your answers save to your account.</p>`;
+  }
+  return '';
+}
+
 function renderSetup() {
   if (!draft) {
     draft = { ...state.profile, routine: 'suggested', ab: 'same' };
@@ -5146,11 +5163,13 @@ function renderSetup() {
   if (setupStep === 0) {
     app.innerHTML = `
     <section class="welcome">
-      ${BRAND}
+      <div class="welcome-top">${BRAND}${account.status === 'signedOut' ? '<a class="btn ghost" href="/api/auth/google/start">Sign in</a>' : ''}</div>
       ${welcomeBoard()}
       <h1>Training that fits your actual week</h1>
       <p class="lead">Tell Slotted when you have school, sport and everything else. It fits your gym sessions into the gaps, keeps leg days away from game days, and reshuffles when your week changes.</p>
       <div class="actions"><button type="button" class="primary big" id="start">Get started</button><span class="muted small">Takes about a minute</span></div>
+      ${welcomeAccount()}
+      ${isIOS() && !isStandalone() ? '<p class="small muted welcome-tip">Tip: in Safari, tap Share, then Add to Home Screen, to use Slotted like an app.</p>' : ''}
     </section>`;
     document.getElementById('start').addEventListener('click', () => { setupStep = 1; renderSetup(); });
     return;
@@ -9341,8 +9360,11 @@ function applySync(data, updatedAt, retry = true) {
   const d = syncDecision(state, data, updatedAt);
   if (d.action === 'ask') { syncAsk = { data, updatedAt }; showSyncAsk(); return 'ask'; }
   if (d.action === 'adopt' || d.action === 'merge') {
+    const fromWelcome = !state.setupDone;
     adoptState(d.state, updatedAt);
-    if (d.first) toast('Signed in. Your account’s routine and timetable are now on this device. Workouts logged here were kept.');
+    // Signed in from the welcome screen: go straight into the app with the account's routine and timetable.
+    if (fromWelcome && state.setupDone) { setupStep = 0; draft = null; location.hash = '#home'; toast('Welcome back. Your routine and timetable are here.'); }
+    else if (d.first) toast('Signed in. Your account’s routine and timetable are now on this device. Workouts logged here were kept.');
     if (d.push) pushNow(retry);
     route();
   } else if (d.action === 'push') pushNow(retry);
@@ -9415,7 +9437,7 @@ async function pushNow(retry = true) {
 }
 
 function refreshAccountViews() {
-  if (!state.setupDone) return;
+  if (!state.setupDone) { if (setupStep === 0 && viewName() !== 'workout') renderSetup(); return; }
   const view = viewName();
   if (view === 'profile') renderSettings();
   else if (view === 'plan') renderPlan();
