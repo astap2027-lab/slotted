@@ -990,3 +990,9 @@ a.item.gym:hover { border-color: var(--lime-line); }
 /* ---------- choosing which copy to keep ---------- */
 .sync-ask { flex-direction: column; align-items: stretch; gap: 10px; width: min(460px, calc(100vw - 32px)); padding: 14px 16px; }
 .sync-ask .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ---------- signing in from the welcome screen ---------- */
+.welcome-signin { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 18px; }
+.welcome-signin p { margin: 0; }
+.welcome-tip { margin-top: 10px; }
+.welcome-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }

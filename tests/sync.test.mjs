@@ -183,3 +183,11 @@ test('ordinary syncing is unchanged', async () => {
   // Two devices with real setups that differ is a normal merge, not a question.
   assert.equal(syncDecision(full(), full({ routine: { mode: 'custom', workouts: [{ exercises: [{ name: 'Squat' }] }] } }), 950).action, 'adopt');
 });
+
+test('signing in from the welcome screen: an account with data is taken as it is; an empty account leaves setup to run', async () => {
+  const { syncDecision } = await import('../js/sync.js');
+  const fresh = { setupDone: false, updatedAt: Date.now(), profile: { sessionsPerWeek: 3 } };
+  const d = syncDecision(fresh, full(), 2000);
+  assert.equal(d.action, 'adopt'); assert.equal(d.state.setupDone, true); assert.equal(d.state.routine.mode, 'custom');
+  assert.equal(syncDecision(fresh, null, 0).action, 'none', 'nothing saved yet: the setup questions run and nothing is uploaded');
+});
