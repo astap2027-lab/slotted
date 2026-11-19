@@ -995,4 +995,6 @@ a.item.gym:hover { border-color: var(--lime-line); }
 .welcome-signin { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 18px; }
 .welcome-signin p { margin: 0; }
 .welcome-tip { margin-top: 10px; }
+.app-signin-note { flex-basis: 100%; border: 1px solid var(--lime); border-radius: 12px; padding: 10px 12px; margin-top: 10px; }
+.app-signin-note p { margin: 0 0 8px; }
 .welcome-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }

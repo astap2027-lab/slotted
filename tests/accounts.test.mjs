@@ -213,3 +213,74 @@ test('the sync size limit counts bytes, not characters', async () => {
 test('a non-race Strava activity is not marked hard', () => {
   assert.equal(simplify({ id: 1, sport_type: 'Ride', start_date_local: '2026-11-04T17:00:00Z', moving_time: 3600 }).hard, false);
 });
+
+// ---------- signing in the iPhone home-screen app ----------
+import * as appPage from '../functions/api/auth/app.js';
+import * as appClaim from '../functions/api/auth/app-claim.js';
+import { createHash, randomBytes } from 'node:crypto';
+
+const appSecret = () => {
+  const s = randomBytes(32).toString('base64url');
+  return { s, h: createHash('sha256').update(s).digest('hex') };
+};
+const claim = (secret, origin = SITE) => appClaim.onRequestPost({ request: send('POST', '/api/auth/app-claim', '', { secret }, origin), env });
+
+async function appSignIn(h) {
+  const s = await start.onRequestGet({ request: get(`/api/auth/google/start?app=${h}`), env });
+  const state = decodeURIComponent(cookieOf(s, 'slotted_oauth'));
+  assert.equal(cookieOf(s, 'slotted_app'), h, 'only the hash goes to Safari');
+  mockFetch([['oauth2.googleapis.com/token', () => Response.json({
+    id_token: jwt({ iss: 'https://accounts.google.com', aud: 'gid', sub: 'google-1', email: 'axel@example.com', name: 'Axel', exp: Date.now() / 1000 + 600 }),
+  })]]);
+  const res = await callback.onRequestGet({ request: get(`/api/auth/google/callback?code=abc&state=${state}`, `slotted_oauth=${state}; slotted_app=${h}`), env });
+  return { res, cookie: `slotted_session=${cookieOf(res, 'slotted_session')}; slotted_app=${h}` };
+}
+
+test('home-screen app sign-in: Safari confirms with the code, then the app collects its own session', async () => {
+  const { s, h } = appSecret();
+  const { res, cookie } = await appSignIn(h);
+  assert.equal(res.headers.get('Location'), '/api/auth/app');
+
+  // Before confirming, the app's secret is worth nothing.
+  assert.deepEqual(await (await claim(s)).json(), { ok: false });
+
+  const page = await appPage.onRequestGet({ request: get('/api/auth/app', cookie), env });
+  const html = await page.text();
+  assert.match(html, new RegExp(h.slice(0, 4).toUpperCase()));
+  assert.match(html, /Signed in as <b>Axel<\/b>/);
+  assert.match(html, /<form method="post">/);
+  assert.equal(page.headers.get('x-frame-options'), 'DENY');
+
+  const done = await appPage.onRequestPost({ request: send('POST', '/api/auth/app', cookie), env });
+  assert.match(await done.text(), /Go back to the Slotted app/);
+  assert.match(done.headers.getSetCookie().join(';'), /slotted_app=;/);
+
+  const got = await claim(s);
+  assert.deepEqual(await got.json(), { ok: true });
+  const appCookie = `slotted_session=${cookieOf(got, 'slotted_session')}`;
+  assert.equal(decodeURIComponent(appCookie.split('=')[1]), s);
+  const who = await (await me.onRequestGet({ request: get('/api/me', appCookie), env })).json();
+  assert.equal(who.signedIn, true);
+  assert.equal(who.user.name, 'Axel');
+  assert.notEqual(appCookie, cookie.split(';')[0], 'the app gets its own session, not Safari’s');
+});
+
+test('home-screen app sign-in refuses other sites, bad secrets, and Safari pages without a signed-in person', async () => {
+  const { s, h } = appSecret();
+  const { cookie } = await appSignIn(h);
+  const cross = await appPage.onRequestPost({ request: send('POST', '/api/auth/app', cookie, null, 'https://evil.example'), env });
+  assert.equal(cross.status, 403);
+  assert.deepEqual(await (await claim(s)).json(), { ok: false });
+  assert.equal((await claim('short')).status, 400);
+  assert.equal((await claim(s, 'https://evil.example')).status, 403);
+  const noUser = await appPage.onRequestGet({ request: get('/api/auth/app', `slotted_app=${h}`), env });
+  assert.equal(noUser.status, 400);
+  const noApp = await appPage.onRequestGet({ request: get('/api/auth/app', cookie.split(';')[0]), env });
+  assert.equal(noApp.status, 400);
+  // A plain sign-in (no app) still goes straight back to the site.
+  const plain = await signIn();
+  assert.equal(plain.res.headers.get('Location'), '/?signin=ok#profile');
+  // A start link with a malformed app value is ignored.
+  const st = await start.onRequestGet({ request: get('/api/auth/google/start?app=nothex'), env });
+  assert.equal(cookieOf(st, 'slotted_app'), undefined);
+});

@@ -1002,6 +1002,8 @@ a.item.gym:hover { border-color: var(--lime-line); }
 .welcome-signin { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 18px; }
 .welcome-signin p { margin: 0; }
 .welcome-tip { margin-top: 10px; }
+.app-signin-note { flex-basis: 100%; border: 1px solid var(--lime); border-radius: 12px; padding: 10px 12px; margin-top: 10px; }
+.app-signin-note p { margin: 0 0 8px; }
 .welcome-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 
 </style>
@@ -4960,7 +4962,7 @@ const MUSCLE_LABEL = Object.fromEntries(MUSCLES.map((m) => [m.id, m.label]));
 const fmtNum = (n) => Math.round(n).toLocaleString('en-AU');
 const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 // The release number. It must match CACHE in sw.js (a test checks); shown at the bottom of Settings.
-const APP_VERSION = 44;
+const APP_VERSION = 45;
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const subnav = (cur) => `<nav class="subnav" aria-label="Training">${[['plan', 'This week'], ['week', 'My week'], ['routine', 'Routine'], ['library', 'Library']]
   .map(([v, t]) => `<a href="#${v}" ${v === cur ? 'aria-current="page"' : ''}>${t}</a>`).join('')}</nav>`;
@@ -5148,7 +5150,7 @@ function welcomeBoard() {
 // The welcome screen's account line: sign in to an existing account, or say who's signed in when the account is new.
 function welcomeAccount() {
   if (account.status === 'signedOut') {
-    return `<div class="welcome-signin"><p class="small muted">Already use Slotted on another device?</p><a class="btn" href="/api/auth/google/start">Sign in with Google</a></div>`;
+    return `<div class="welcome-signin"><p class="small muted">Already use Slotted on another device?</p>${signinLink('Sign in with Google', 'btn')}${appSigninNote()}</div>`;
   }
   if (account.status === 'signedIn' && account.user) {
     return `<p class="small muted welcome-signin">Signed in as ${esc(account.user.name || account.user.email || 'you')}. Your account has nothing saved yet, so answer a few questions to set up. Your answers save to your account.</p>`;
@@ -5163,7 +5165,7 @@ function renderSetup() {
   if (setupStep === 0) {
     app.innerHTML = `
     <section class="welcome">
-      <div class="welcome-top">${BRAND}${account.status === 'signedOut' ? '<a class="btn ghost" href="/api/auth/google/start">Sign in</a>' : ''}</div>
+      <div class="welcome-top">${BRAND}${account.status === 'signedOut' ? signinLink('Sign in', 'btn ghost') : ''}</div>
       ${welcomeBoard()}
       <h1>Training that fits your actual week</h1>
       <p class="lead">Tell Slotted when you have school, sport and everything else. It fits your gym sessions into the gaps, keeps leg days away from game days, and reshuffles when your week changes.</p>
@@ -9327,7 +9329,87 @@ function adoptState(next, syncedAt) {
   syncRoutine();
 }
 
+// ---------- signing in the iPhone home-screen app ----------
+// Google sign-in often stalls inside an iPhone home-screen app, and that app keeps its cookies apart from Safari.
+// So there, Sign in opens Safari with the SHA-256 of a secret made here; the person signs in and confirms the code
+// in Safari (/api/auth/app), and this app trades the secret for its own session (/api/auth/app-claim).
+const APP_SIGNIN_KEY = 'slotted:v1:app-signin';
+const APP_SIGNIN_MS = 10 * 60 * 1000;
+let appSignin = null; // { s, h, at, tapped }
+let appSigninTimer = null;
+const appSigninOn = () => isIOS() && isStandalone();
+
+async function prepAppSignin() {
+  if (!appSigninOn()) return;
+  try { appSignin = JSON.parse(localStorage.getItem(APP_SIGNIN_KEY) || 'null'); } catch { appSignin = null; }
+  if (appSignin && appSignin.s && appSignin.h && Date.now() - appSignin.at < APP_SIGNIN_MS) return;
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  const s = btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  appSignin = { s, h: [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join(''), at: Date.now(), tapped: 0 };
+  saveAppSignin();
+}
+function saveAppSignin() {
+  try { if (appSignin) localStorage.setItem(APP_SIGNIN_KEY, JSON.stringify(appSignin)); else localStorage.removeItem(APP_SIGNIN_KEY); } catch { /* private mode */ }
+}
+const appSigninWaiting = () => !!(appSignin && appSignin.tapped && Date.now() - appSignin.tapped < APP_SIGNIN_MS);
+
+function signinLink(label, cls) {
+  if (appSigninOn() && appSignin) {
+    return `<a class="${cls}" href="/api/auth/google/start?app=${appSignin.h}" target="_blank" rel="noopener" data-appsignin>${label}</a>`;
+  }
+  return `<a class="${cls}" href="/api/auth/google/start">${label}</a>`;
+}
+function appSigninNote() {
+  if (!appSigninWaiting()) return '';
+  return `<div class="app-signin-note"><p class="small">Finish in Safari: choose your Google account, check the code is <b>${appSignin.h.slice(0, 4).toUpperCase()}</b>, tap <b>Yes, sign in the app</b>, then come back here.</p>
+    <div class="actions"><button type="button" class="ghost" data-appsignin-check>I’ve done that</button></div></div>`;
+}
+
+let appClaiming = false;
+async function claimAppSignin(fromButton) {
+  if (!appSignin || account.status === 'signedIn' || appClaiming) return false;
+  appClaiming = true;
+  let ok = false;
+  try {
+    const res = await fetch('/api/auth/app-claim', {
+      method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ secret: appSignin.s }),
+    });
+    ok = res.ok && (await res.json()).ok === true;
+  } catch { /* offline: try again later */ }
+  appClaiming = false;
+  if (!ok) {
+    if (fromButton) toast('Not finished yet. In Safari, tap Yes, sign in the app, then come back.');
+    return false;
+  }
+  appSignin = null;
+  saveAppSignin();
+  clearInterval(appSigninTimer);
+  const wasSetup = state.setupDone;
+  await loadAccount();
+  // From the welcome screen, applySync() says "Welcome back" (or the welcome screen says who's signed in).
+  if (account.status === 'signedIn' && wasSetup) toast('Signed in. Your training now syncs to your account.');
+  return true;
+}
+function watchAppSignin() {
+  clearInterval(appSigninTimer);
+  appSigninTimer = setInterval(() => {
+    if (!appSigninWaiting()) { clearInterval(appSigninTimer); return; }
+    if (document.visibilityState === 'visible') claimAppSignin(false);
+  }, 3000);
+}
+document.addEventListener('click', (e) => {
+  if (e.target.closest('[data-appsignin]') && appSignin) {
+    appSignin.tapped = Date.now();
+    saveAppSignin();
+    watchAppSignin();
+    setTimeout(refreshAccountViews, 50);
+  } else if (e.target.closest('[data-appsignin-check]')) claimAppSignin(true);
+});
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && appSigninWaiting()) claimAppSignin(false); });
+
 async function loadAccount() {
+  await prepAppSignin().catch(() => {});
   try {
     const res = await fetch('/api/me', { credentials: 'same-origin' });
     if (!res.ok) throw new Error('unavailable');
@@ -9337,6 +9419,8 @@ async function loadAccount() {
     account = { status: 'unavailable' };
   }
   if (account.status === 'signedIn') await pull();
+  else if (account.status === 'signedOut' && appSigninWaiting() && await claimAppSignin(false)) return;
+  else if (appSigninWaiting()) watchAppSignin();
   refreshAccountViews();
   scheduleGcal(0);
 }
@@ -9517,7 +9601,7 @@ function accountPanel() {
   if (account.status === 'signedOut') {
     return `<section class="card stack"><h2>Account</h2>
       <p class="small">Sign in to back up your training and use it on any device. Everything on this device comes with you.</p>
-      <div class="actions"><a class="btn primary" href="/api/auth/google/start">Sign in with Google</a></div>
+      <div class="actions">${signinLink('Sign in with Google', 'btn primary')}</div>${appSigninNote()}
       <p class="muted small"><a href="privacy.html">How your data is used</a></p></section>`;
   }
   const status = { saving: 'Saving…', saved: 'All changes saved', offline: 'Offline. Changes will save when you’re back online.', error: 'Couldn’t save. Will try again.' }[syncStatus] || 'Synced';

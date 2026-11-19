@@ -1,5 +1,5 @@
 // GET /api/auth/google/start: send the person to Google to sign in.
-import { json, redirect, randomToken, setCookie, siteOrigin } from '../../../../server/lib.js';
+import { json, redirect, randomToken, setCookie, siteOrigin, APP_COOKIE, isAppHash } from '../../../../server/lib.js';
 
 export async function onRequestGet({ request, env }) {
   // All three are needed: without the secret, Google's reply can't be exchanged and sign-in would always fail.
@@ -13,5 +13,9 @@ export async function onRequestGet({ request, env }) {
     state,
     prompt: 'select_account',
   });
-  return redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`, [setCookie('slotted_oauth', state, 600)]);
+  const cookies = [setCookie('slotted_oauth', state, 600)];
+  // Started from the iPhone home-screen app: remember which app is waiting (only a hash of its secret).
+  const app = new URL(request.url).searchParams.get('app');
+  if (isAppHash(app)) cookies.push(setCookie(APP_COOKIE, app, 600));
+  return redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`, cookies);
 }

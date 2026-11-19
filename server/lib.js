@@ -49,7 +49,7 @@ export function decodeJwtPayload(jwt) {
 
 // ---------- sessions ----------
 export const SESSION_COOKIE = 'slotted_session';
-const SESSION_SECONDS = 60 * 60 * 24 * 60;
+export const SESSION_SECONDS = 60 * 60 * 24 * 60;
 const now = () => Math.floor(Date.now() / 1000);
 
 export async function createSession(env, userId) {
@@ -75,6 +75,14 @@ export async function endSession(request, env) {
   if (token && env.DB) await env.DB.prepare('DELETE FROM sessions WHERE token_hash = ?').bind(await sha256(token)).run();
   return clearCookie(SESSION_COOKIE);
 }
+
+// ---------- signing in the iPhone home-screen app ----------
+// A home-screen app on iPhone can't always finish Google sign-in itself and keeps its cookies apart from Safari.
+// So the app makes a secret, sends only its SHA-256 (64 hex) to Safari, the person signs in there and confirms,
+// and the server stores that hash as a new session. The app then trades its secret for the session cookie.
+export const APP_COOKIE = 'slotted_app';
+export const isAppHash = (h) => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h);
+export const appCode = (h) => h.slice(0, 4).toUpperCase();
 
 // ---------- encrypting stored tokens ----------
 // TOKEN_KEY is 32 random bytes, base64 encoded. Generate one with: openssl rand -base64 32
