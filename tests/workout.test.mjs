@@ -61,3 +61,18 @@ test('the recap summarises last week', () => {
   const empty = weekRecap({ history, log, prevKey: '2026-10-12', targetFor: () => 4 });
   assert.equal(empty.hadWeek, false);
 });
+
+test('rest plan: your own time wins, else big lifts and smaller exercises, and it says why', async () => {
+  const { restPlan, cleanRest, restDefaults } = await import('../js/workout.js');
+  assert.deepEqual(restPlan('muscle', 'squat', 'Barbell back squat'), { sec: 120, why: 'main' });
+  assert.deepEqual(restPlan('muscle', 'x_lateral_raise', 'Lateral raise'), { sec: 75, why: 'other' });
+  assert.deepEqual(restPlan('muscle', 'x_lateral_raise', 'Lateral raise', 90), { sec: 90, why: 'yours' });
+  assert.deepEqual(restPlan('strength', 'squat', 'Squat', 100), { sec: 105, why: 'yours' }, 'rounded to 15 s');
+  assert.deepEqual(restPlan('muscle', 'squat', 'Squat', 0), { sec: 120, why: 'main' }, '0 means none');
+  assert.deepEqual(restPlan('muscle', 'squat', 'Squat', 'junk'), { sec: 120, why: 'main' });
+  assert.equal(cleanRest(5), 15);
+  assert.equal(cleanRest(5000), 600);
+  assert.equal(cleanRest(-30), 0);
+  assert.deepEqual(restDefaults('muscle'), { main: 120, other: 75 });
+  assert.deepEqual(restDefaults('nonsense'), { main: 120, other: 75 });
+});

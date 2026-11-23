@@ -17,6 +17,25 @@ export function restSeconds(goal, move, name) {
   return isMainLift(move, name) ? main : other;
 }
 
+// The default lengths for a goal, for the Settings explanation.
+export const restDefaults = (goal) => { const [main, other] = REST[goal] || REST.muscle; return { main, other }; };
+
+// A rest time the athlete chose for one exercise: 15 s steps, 15 s to 10 min. Anything else reads as none.
+export function cleanRest(sec) {
+  const n = Number(sec);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(600, Math.max(15, Math.round(n / 15) * 15));
+}
+
+// How long to rest after a set, and why: the athlete's own time for this exercise if they set one
+// (in Routine or with +15/−15), else 2:00-style for big lifts and a shorter rest for smaller exercises.
+export function restPlan(goal, move, name, saved) {
+  const mine = cleanRest(saved);
+  if (mine) return { sec: mine, why: 'yours' };
+  const main = isMainLift(move, name);
+  return { sec: restSeconds(goal, move, name), why: main ? 'main' : 'other' };
+}
+
 // ---------- plates ----------
 export const PLATES = [25, 20, 15, 10, 5, 2.5, 1.25];
 

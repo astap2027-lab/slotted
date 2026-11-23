@@ -18,7 +18,7 @@ import { load, save, exportJSON, importJSON, reset, defaultState, snapshotSave, 
 import { mergeStates, forUpload, syncDecision, hasSetup, setupSig } from './sync.js';
 import { computeFreshness, freshnessLevel, LEVEL_LABELS, musclesFor, MUSCLES, PARTS, EFFORT, MAP_GROUPS } from './freshness.js';
 import { FRONT, BACK } from './anatomy.js';
-import { restSeconds, platesPerSide, warmupSets, usesBarbell, alternatives, weekRecap, PLATES } from './workout.js';
+import { restPlan, restDefaults, cleanRest, platesPerSide, warmupSets, usesBarbell, alternatives, weekRecap, PLATES } from './workout.js';
 import {
   setMoveResolver, setCustomExercises, exerciseForMove, findExercise, exerciseById, searchExercises, alternativesFor,
   similarExercises, suggestMapping, validateExercise, allExercises, MUSCLE_INFO, MUSCLE_GROUPS, EQUIPMENT, CATEGORIES,
@@ -107,7 +107,7 @@ const MUSCLE_LABEL = Object.fromEntries(MUSCLES.map((m) => [m.id, m.label]));
 const fmtNum = (n) => Math.round(n).toLocaleString('en-AU');
 const fmtK = (n) => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 // The release number. It must match CACHE in sw.js (a test checks); shown at the bottom of Settings.
-const APP_VERSION = 44;
+const APP_VERSION = 46;
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const subnav = (cur) => `<nav class="subnav" aria-label="Training">${[['plan', 'This week'], ['week', 'My week'], ['routine', 'Routine'], ['library', 'Library']]
   .map(([v, t]) => `<a href="#${v}" ${v === cur ? 'aria-current="page"' : ''}>${t}</a>`).join('')}</nav>`;
@@ -222,10 +222,25 @@ function profileFields() {
   <section class="set-section" style="margin-top:26px">
     <h2>Workouts</h2>
     <div class="setrows">
-      ${setSelect('restMode', 'Rest timer', [['sound', 'On, with a beep'], ['silent', 'On, silent'], ['off', 'Off']], state.restMode || 'sound', 'Starts when you tick a set')}
+      ${setSelect('restMode', 'Rest timer', [['sound', 'On, with a beep'], ['silent', 'On, silent'], ['off', 'Off']], state.restMode || 'sound', restNote())}
       ${setSelect('barKg', 'Barbell', [[20, `${barFor(units(), 20)} ${unitLabel(units())} bar`], [15, `${barFor(units(), 15)} ${unitLabel(units())} bar`]], state.barKg || 20, 'For plates and warm-ups')}
     </div>
   </section>`;
+}
+
+// Each routine row's rest: Auto (big lifts 2:00-style, smaller exercises shorter) or the athlete's own time,
+// stored by exercise in state.restTimes, the same place +15/−15 in a workout saves to.
+const REST_CHOICES = [45, 60, 75, 90, 120, 150, 180];
+function restSelect(e) {
+  const mine = cleanRest((state.restTimes || {})[exerciseKey(e.name || '')]);
+  const opts = [...new Set([...REST_CHOICES, ...(mine ? [mine] : [])])].sort((a, b) => a - b);
+  return `<select class="exrest" data-efield="rest" aria-label="Rest after each set of ${esc(e.name || 'this exercise')}" ${e.name ? '' : 'disabled'}>
+    <option value="">Auto rest</option>${opts.map((v) => `<option value="${v}" ${v === mine ? 'selected' : ''}>${mmss(v)} rest</option>`).join('')}</select>`;
+}
+
+function restNote() {
+  const d = restDefaults(state.profile.goal);
+  return `Starts when you tick a set. Big lifts rest ${mmss(d.main)}, smaller exercises ${mmss(d.other)}, unless you pick a time in Routine or tap +15/−15.`;
 }
 
 function readProfile(form) {
@@ -2683,7 +2698,7 @@ function wireSessionActions(rerender, opts = {}) {
     const kind = newBest(bestTrack(ex), prev, normSet(log[move][i], track));
     if (kind) toast(bestText(kind, ex.name, normSet(log[move][i], track), units()));
     if (!completeIfFinished(sk)) {
-      startRest(restSeconds(state.profile.goal, move, ex.name), nextSetLabel(sess, shown, key));
+      startRest(restPlan(state.profile.goal, move, ex.name, (state.restTimes || {})[move]), nextSetLabel(sess, shown, key), { move, name: ex.name });
       if (isHold(track) || doneSets(log[move]).length >= ex.sets) rerender();
     }
   }));
@@ -3103,7 +3118,7 @@ function renderSummary(ctx, s) {
 
 // ---------- rest timer ----------
 // Starts when a set is ticked. Lives outside the page content so it survives re-renders.
-let rest = null; // { end, total, next, done }
+let rest = null; // { end, total, next, done, move, name, why, start }
 let restTick = null;
 let wakeLock = null;
 let audioCtx = null;
@@ -3155,7 +3170,7 @@ function restEl() {
       if (!b || !rest) return;
       const a = b.dataset.rest;
       if (a === 'skip') stopRest();
-      else { rest.end = Math.max(Date.now() + 1000, rest.end + Number(a) * 1000); rest.total = Math.max(rest.total + Number(a), 1); drawRest(); }
+      else { rest.end = Math.max(Date.now() + 1000, rest.end + Number(a) * 1000); rest.total = Math.max(rest.total + Number(a), 15); drawRest(); }
     });
   }
   return el;
@@ -3171,6 +3186,7 @@ function drawRest() {
     rest.done = true;
     if (state.restMode !== 'silent') beep();
     try { navigator.vibrate && navigator.vibrate([180, 90, 180]); } catch { /* ignore */ }
+    keepRestTime();
     setTimeout(() => { if (rest && rest.done) stopRest(); }, 6000);
   }
   const pct = rest.total ? Math.min(100, ((rest.total - left) / rest.total) * 100) : 100;
@@ -3182,6 +3198,7 @@ function drawRest() {
       <div class="rest-time" role="timer" aria-live="off">${rest.done ? 'Go' : mmss(left)}</div>
       <div class="rest-text">
         <b>${rest.done ? 'Rest done' : 'Resting'}</b>
+        ${rest.done ? '' : `<span class="rest-why">${esc(restWhy(rest))}</span>`}
         ${rest.next ? `<span>Next: ${esc(rest.next)}</span>` : ''}
       </div>
       <div class="rest-actions">
@@ -3191,10 +3208,32 @@ function drawRest() {
     </div>`;
 }
 
-function startRest(seconds, next) {
+// Why the timer picked this length, in a few words.
+function restWhy(r) {
+  const len = mmss(r.start);
+  if (r.why === 'yours') return `${len}, your time for ${r.name}`;
+  if (r.why === 'main') return `${len} for big lifts`;
+  if (r.why === 'other') return `${len} for smaller exercises`;
+  return '';
+}
+
+// After +15/−15, remember the new length for that exercise (once, when the rest ends or is closed).
+function keepRestTime() {
+  if (!rest || !rest.move || rest.kept) return;
+  rest.kept = true;
+  const sec = cleanRest(rest.total);
+  if (!sec || sec === rest.start) return;
+  state.restTimes = { ...(state.restTimes || {}), [rest.move]: sec };
+  commit();
+  toast(`${rest.name} will rest ${mmss(sec)} from now on. Change it in Routine.`);
+}
+
+function startRest(plan, next, about = {}) {
+  const { sec: seconds, why } = typeof plan === 'number' ? { sec: plan, why: '' } : plan;
   if (state.restMode === 'off' || !seconds) return;
+  keepRestTime();
   if (state.restMode !== 'silent') { try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); } catch { /* ignore */ } }
-  rest = { end: Date.now() + seconds * 1000, total: seconds, next, done: false };
+  rest = { end: Date.now() + seconds * 1000, total: seconds, start: seconds, next, done: false, why, move: about.move, name: about.name || 'This exercise' };
   document.body.classList.add('resting');
   clearInterval(restTick);
   restTick = setInterval(drawRest, 250);
@@ -3203,6 +3242,7 @@ function startRest(seconds, next) {
 }
 
 function stopRest() {
+  keepRestTime();
   rest = null;
   document.body.classList.remove('resting');
   clearInterval(restTick);
@@ -3830,13 +3870,14 @@ function renderRoutine() {
         </div>
       </div>
       <div class="exgrid" role="table" aria-label="${esc(w.name)} exercises">
-        <div class="exgrid-head" role="row"><span role="columnheader">Exercise</span><span role="columnheader">Sets</span><span role="columnheader">Reps</span><span role="columnheader">Start ${unitLabel(units())}</span><span role="columnheader">Muscle</span><span></span></div>
+        <div class="exgrid-head" role="row"><span role="columnheader">Exercise</span><span role="columnheader">Sets</span><span role="columnheader">Reps</span><span role="columnheader">Start ${unitLabel(units())}</span><span role="columnheader">Rest</span><span role="columnheader">Muscle</span><span></span></div>
         ${w.exercises.map((e) => `
         <div class="exline" role="row" data-e="${e.id}">
           <input type="text" list="exlib" value="${esc(e.name)}" placeholder="Exercise" data-efield="name" aria-label="Exercise name">
           <input type="number" inputmode="numeric" min="1" max="10" value="${esc(e.sets)}" data-efield="sets" aria-label="Sets">
           <input type="text" value="${esc(e.reps)}" placeholder="8–12" data-efield="reps" aria-label="Reps">
           ${routineWantsWeight(e) ? `<input type="number" inputmode="decimal" min="0" step="0.5" value="${e.startKg ? esc(wt(e.startKg)) : ''}" placeholder="${unitLabel(units())}" data-efield="startKg" aria-label="Starting weight in ${unitLabel(units()) === 'lb' ? 'pounds' : 'kilograms'} (optional)">` : '<span class="exline-gap"></span>'}
+          ${restSelect(e)}
           <select data-efield="group" aria-label="Muscle group">${GROUPS.map((g) => `<option value="${g}" ${e.group === g ? 'selected' : ''}>${GROUP_LABEL[g]}</option>`).join('')}</select>
           <button type="button" class="ghost" data-edel aria-label="Remove ${esc(e.name || 'exercise')}">×</button>
         </div>`).join('')}
@@ -3886,9 +3927,22 @@ function renderRoutine() {
     const w = findW(i);
     const e = w.exercises.find((x) => x.id === i.closest('[data-e]').dataset.e);
     const f = i.dataset.efield;
+    if (f === 'rest') {
+      const k = exerciseKey(e.name || '');
+      const sec = cleanRest(i.value);
+      const times = { ...(state.restTimes || {}) };
+      if (sec) times[k] = sec; else delete times[k];
+      state.restTimes = times;
+      commit(); return;
+    }
     if (f === 'startKg') { const kg = typedWeight(i.value) === '' ? '' : toKg(typedWeight(i.value), units()); if (kg === '' || !(kg > 0)) delete e.startKg; else e.startKg = kg; save(); return; }
+    const oldName = e.name;
     e[f] = f === 'sets' ? Math.max(1, Math.min(10, Number(i.value) || 3)) : i.value;
     if (f === 'name') {
+      // A renamed row keeps its rest time.
+      const times = state.restTimes || {};
+      const was = exerciseKey(oldName || ''), now = exerciseKey(i.value.trim());
+      if (oldName && times[was] && !times[now] && was !== now) state.restTimes = { ...times, [now]: times[was] };
       const lex = findExercise(i.value.trim());
       const old = LIBRARY.find((l) => l.name.toLowerCase() === i.value.trim().toLowerCase());
       const group = lex ? routineGroup(lex) : old && old.group;
