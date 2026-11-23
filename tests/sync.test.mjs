@@ -191,3 +191,11 @@ test('signing in from the welcome screen: an account with data is taken as it is
   assert.equal(d.action, 'adopt'); assert.equal(d.state.setupDone, true); assert.equal(d.state.routine.mode, 'custom');
   assert.equal(syncDecision(fresh, null, 0).action, 'none', 'nothing saved yet: the setup questions run and nothing is uploaded');
 });
+
+test('rest times per exercise come along with the newer copy, and old copies without them still merge', async () => {
+  const { mergeStates } = await import('../js/sync.js');
+  const local = { updatedAt: 200, restTimes: { x_lateral_raise: 90 }, history: {}, log: {} };
+  const server = { updatedAt: 100, history: {}, log: {} };
+  assert.deepEqual(mergeStates(local, server).restTimes, { x_lateral_raise: 90 });
+  assert.equal(mergeStates({ ...local, restTimes: undefined, updatedAt: 50 }, server).restTimes, undefined);
+});
